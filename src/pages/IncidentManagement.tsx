@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import {
   Button,
   Modal,
@@ -18,7 +18,9 @@ import {
   Empty,
   Upload,
   Badge,
-  Timeline
+  Timeline,
+  Tabs,
+  Radio
 } from 'antd'
 import {
   PlusOutlined,
@@ -28,7 +30,9 @@ import {
   UploadOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
-  WarningOutlined
+  WarningOutlined,
+  UnorderedListOutlined,
+  AppstoreOutlined
 } from '@ant-design/icons'
 import { v4 as uuidv4 } from 'uuid'
 import dayjs from 'dayjs'
@@ -58,6 +62,12 @@ const statusOptions = [
   { value: 'resolved', label: '已解决', color: 'success', icon: <CheckCircleOutlined /> }
 ]
 
+const statusGroups = [
+  { value: 'pending', label: '待处理', color: '#faad14', bgColor: '#fffbe6', borderColor: '#ffe58f' },
+  { value: 'processing', label: '处理中', color: '#1677ff', bgColor: '#e6f4ff', borderColor: '#91caff' },
+  { value: 'resolved', label: '已解决', color: '#52c41a', bgColor: '#f6ffed', borderColor: '#b7eb8f' }
+]
+
 const IncidentManagement: React.FC = () => {
   const { state, dispatch } = useApp()
   const [form] = Form.useForm()
@@ -66,6 +76,10 @@ const IncidentManagement: React.FC = () => {
   const [editingIncident, setEditingIncident] = useState<Incident | null>(null)
   const [viewingIncident, setViewingIncident] = useState<Incident | null>(null)
   const [images, setImages] = useState<{ name: string; dataUrl: string }[]>([])
+  const [viewMode, setViewMode] = useState<'list' | 'kanban'>('list')
+  const [draggedIncident, setDraggedIncident] = useState<Incident | null>(null)
+  const [dragOverStatus, setDragOverStatus] = useState<string | null>(null)
+  const kanbanRef = useRef<HTMLDivElement>(null)
 
   const currentVoyage = state.voyages.find(v => v.id === state.currentVoyageId)
   const voyageShifts = state.shifts.filter(s => s.voyageId === state.currentVoyageId)
@@ -159,6 +173,24 @@ const IncidentManagement: React.FC = () => {
     message.success('事件已删除')
   }
 
+  const handleStatusChange = (incident: Incident, newStatus: Incident['status']) => {
+    if (incident.status === newStatus) return
+
+    const updateData: Partial<Incident> = { status: newStatus }
+
+    if (newStatus === 'resolved' && !incident.resolvedTime) {
+      updateData.resolvedTime = dayjs().format('YYYY-MM-DD HH:mm')
+    }
+
+    dispatch({
+      type: 'UPDATE_INCIDENT',
+      payload: { ...incident, ...updateData }
+    })
+
+    const statusLabel = statusOptions.find(s => s.value === newStatus)?.label
+    message.success(`状态已更新为「${statusLabel}」`)
+  }
+
   const handleSubmit = () => {
     form.validateFields().then(values => {
       const incidentData: Omit<Incident, 'id' | 'createdAt'> = {
@@ -204,6 +236,37 @@ const IncidentManagement: React.FC = () => {
     })
   }
 
+  const handleDragStart = (e: React.DragEvent, incident: Incident) => {
+    setDraggedIncident(incident)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const handleDragEnd = () => {
+    setDraggedIncident(null)
+    setDragOverStatus(null)
+  }
+
+  const handleDragOver = (e: React.DragEvent, status: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    if (dragOverStatus !== status) {
+      setDragOverStatus(status)
+    }
+  }
+
+  const handleDragLeave = () => {
+    setDragOverStatus(null)
+  }
+
+  const handleDrop = (e: React.DragEvent, status: Incident['status']) => {
+    e.preventDefault()
+    if (draggedIncident) {
+      handleStatusChange(draggedIncident, status)
+    }
+    setDraggedIncident(null)
+    setDragOverStatus(null)
+  }
+
   const columns = [
     {
       title: '事件标题',
@@ -238,8 +301,19 @@ const IncidentManagement: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
-      render: (status: Incident['status']) => getStatusTag(status)
+      width: 120,
+      render: (status: Incident['status'], record: Incident) => (
+        <Select
+          size="small"
+          value={status}
+          style={{ width: 100 }}
+          onChange={(newStatus) => handleStatusChange(record, newStatus as Incident['status'])}
+        >
+          {statusOptions.map(opt => (
+            <Option key={opt.value} value={opt.value}>{opt.label}</Option>
+          ))}
+        </Select>
+      )
     },
     {
       title: '报告时间',
@@ -306,6 +380,194 @@ const IncidentManagement: React.FC = () => {
     severe: voyageIncidents.filter(i => i.level === 'severe').length
   }
 
+  const renderIncidentCard = (incident: Incident) => (
+    <div
+      key={incident.id}
+      draggable
+      onDragStart={(e) => handleDragStart(e, incident)}
+      onDragEnd={handleDragEnd}
+      className={`incident-card ${draggedIncident?.id === incident.id ? 'dragging' : ''}`}
+      style={{
+        background: '#fff',
+        border: '1px solid #e8e8e8',
+        borderRadius: 8,
+        padding: 12,
+        marginBottom: 12,
+        cursor: 'grab',
+        transition: 'all 0.2s',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.08)'
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, flex: 1 }}>{incident.title}</div>
+        {incident.level === 'severe' && (
+          <WarningOutlined style={{ color: '#ff4d4f', marginLeft: 8 }} />
+        )}
+      </div>
+      <div style={{ marginBottom: 8 }}>
+        {getTypeTag(incident.type)} {getLevelTag(incident.level)}
+      </div>
+      <div style={{ color: '#666', fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>
+        {incident.description.slice(0, 60)}{incident.description.length > 60 ? '...' : ''}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#999' }}>
+        <span>{formatDateTime(incident.reportedTime)}</span>
+        <span>{getCrewName(incident.crewId)}</span>
+      </div>
+      {incident.images && incident.images.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: 12, color: '#1677ff' }}>
+          <UploadOutlined style={{ marginRight: 4 }} />
+          {incident.images.length}张图片
+        </div>
+      )}
+      <div style={{ marginTop: 8, display: 'flex', gap: 4 }}>
+        <Button
+          size="small"
+          type="text"
+          icon={<EyeOutlined />}
+          onClick={(e) => { e.stopPropagation(); handleView(incident); }}
+          style={{ padding: '0 8px' }}
+        >
+          查看
+        </Button>
+        <Button
+          size="small"
+          type="text"
+          icon={<EditOutlined />}
+          onClick={(e) => { e.stopPropagation(); handleEdit(incident); }}
+          style={{ padding: '0 8px' }}
+        >
+          编辑
+        </Button>
+      </div>
+    </div>
+  )
+
+  const renderKanbanView = () => (
+    <div ref={kanbanRef} style={{ display: 'flex', gap: 16, minHeight: 500 }}>
+      {statusGroups.map(group => {
+        const groupIncidents = voyageIncidents.filter(i => i.status === group.value)
+        const isDragOver = dragOverStatus === group.value
+
+        return (
+          <div
+            key={group.value}
+            style={{
+              flex: 1,
+              background: group.bgColor,
+              border: `2px solid ${isDragOver ? group.color : group.borderColor}`,
+              borderRadius: 8,
+              padding: 16,
+              transition: 'all 0.2s',
+              transform: isDragOver ? 'scale(1.01)' : 'none'
+            }}
+            onDragOver={(e) => handleDragOver(e, group.value)}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => handleDrop(e, group.value as Incident['status'])}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 16,
+              paddingBottom: 12,
+              borderBottom: `2px solid ${group.color}`
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  width: 12,
+                  height: 12,
+                  borderRadius: '50%',
+                  background: group.color
+                }} />
+                <span style={{ fontWeight: 600, fontSize: 16, color: group.color }}>
+                  {group.label}
+                </span>
+              </div>
+              <Tag color={group.color} style={{ margin: 0 }}>
+                {groupIncidents.length}
+              </Tag>
+            </div>
+
+            <div style={{ minHeight: 300 }}>
+              {groupIncidents.length === 0 ? (
+                <Empty
+                  description={<span style={{ color: '#999' }}>暂无{group.label}事件</span>}
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  style={{ padding: '40px 0' }}
+                />
+              ) : (
+                groupIncidents
+                  .sort((a, b) => {
+                    if (a.level === 'severe' && b.level !== 'severe') return -1
+                    if (b.level === 'severe' && a.level !== 'severe') return 1
+                    return dayjs(b.reportedTime).valueOf() - dayjs(a.reportedTime).valueOf()
+                  })
+                  .map(incident => renderIncidentCard(incident))
+              )}
+            </div>
+
+            {isDragOver && draggedIncident && (
+              <div style={{
+                textAlign: 'center',
+                padding: 20,
+                border: '2px dashed #1677ff',
+                borderRadius: 8,
+                color: '#1677ff',
+                background: 'rgba(22, 119, 255, 0.05)'
+              }}>
+                释放以更新状态为「{group.label}」
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+
+  const renderListView = () => (
+    <>
+      <Card title="事件列表">
+        <Table
+          columns={columns}
+          dataSource={voyageIncidents}
+          rowKey="id"
+          bordered
+          pagination={{ pageSize: 10 }}
+        />
+      </Card>
+
+      <Card title="处理时间线" style={{ marginTop: 16 }}>
+        {voyageIncidents.length === 0 ? (
+          <Empty description="暂无异常事件" />
+        ) : (
+          <Timeline
+            mode="left"
+            items={voyageIncidents
+              .sort((a, b) => dayjs(b.reportedTime).valueOf() - dayjs(a.reportedTime).valueOf())
+              .slice(0, 10)
+              .map(incident => ({
+                color: incident.status === 'resolved' ? 'green' :
+                       incident.level === 'severe' ? 'red' : 'blue',
+                label: formatDateTime(incident.reportedTime),
+                children: (
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{incident.title}</div>
+                    <div style={{ color: '#666', fontSize: 12, marginTop: 4 }}>
+                      {getTypeTag(incident.type)} {getLevelTag(incident.level)} {getStatusTag(incident.status)}
+                    </div>
+                    <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>
+                      {incident.description.slice(0, 50)}{incident.description.length > 50 ? '...' : ''}
+                    </div>
+                  </div>
+                )
+              }))}
+          />
+        )}
+      </Card>
+    </>
+  )
+
   if (!state.currentVoyageId || !currentVoyage) {
     return (
       <div className="page-container">
@@ -318,9 +580,26 @@ const IncidentManagement: React.FC = () => {
     <div className="page-container">
       <div className="page-header">
         <h2 className="page-title">异常事件</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
-          记录事件
-        </Button>
+        <Space>
+          <Radio.Group
+            value={viewMode}
+            onChange={(e) => setViewMode(e.target.value)}
+            optionType="button"
+            buttonStyle="solid"
+          >
+            <Radio.Button value="list">
+              <UnorderedListOutlined style={{ marginRight: 4 }} />
+              列表视图
+            </Radio.Button>
+            <Radio.Button value="kanban">
+              <AppstoreOutlined style={{ marginRight: 4 }} />
+              处理跟踪
+            </Radio.Button>
+          </Radio.Group>
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+            记录事件
+          </Button>
+        </Space>
       </div>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -361,44 +640,7 @@ const IncidentManagement: React.FC = () => {
         </Card>
       )}
 
-      <Card title="事件列表">
-        <Table
-          columns={columns}
-          dataSource={voyageIncidents}
-          rowKey="id"
-          bordered
-          pagination={{ pageSize: 10 }}
-        />
-      </Card>
-
-      <Card title="处理时间线" style={{ marginTop: 16 }}>
-        {voyageIncidents.length === 0 ? (
-          <Empty description="暂无异常事件" />
-        ) : (
-          <Timeline
-            mode="left"
-            items={voyageIncidents
-              .sort((a, b) => dayjs(b.reportedTime).valueOf() - dayjs(a.reportedTime).valueOf())
-              .slice(0, 10)
-              .map(incident => ({
-                color: incident.status === 'resolved' ? 'green' :
-                       incident.level === 'severe' ? 'red' : 'blue',
-                label: formatDateTime(incident.reportedTime),
-                children: (
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{incident.title}</div>
-                    <div style={{ color: '#666', fontSize: 12, marginTop: 4 }}>
-                      {getTypeTag(incident.type)} {getLevelTag(incident.level)} {getStatusTag(incident.status)}
-                    </div>
-                    <div style={{ color: '#999', fontSize: 12, marginTop: 4 }}>
-                      {incident.description.slice(0, 50)}{incident.description.length > 50 ? '...' : ''}
-                    </div>
-                  </div>
-                )
-              }))}
-          />
-        )}
-      </Card>
+      {viewMode === 'list' ? renderListView() : renderKanbanView()}
 
       <Modal
         title={editingIncident ? '编辑异常事件' : '记录异常事件'}

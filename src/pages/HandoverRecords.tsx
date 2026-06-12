@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Button,
   Modal,
@@ -16,13 +16,23 @@ import {
   Col,
   Descriptions,
   Empty,
-  Divider
+  Divider,
+  Tooltip,
+  Badge,
+  List,
+  Alert,
+  Checkbox
 } from 'antd'
+import type { CheckboxChangeEvent } from 'antd/es/checkbox'
 import {
   PlusOutlined,
   EditOutlined,
   DeleteOutlined,
-  EyeOutlined
+  EyeOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  WarningOutlined,
+  FileTextOutlined
 } from '@ant-design/icons'
 import { v4 as uuidv4 } from 'uuid'
 import dayjs from 'dayjs'
@@ -35,6 +45,15 @@ const { Option } = Select
 
 const weatherOptions = ['晴', '多云', '阴', '小雨', '中雨', '大雨', '暴雨', '雾', '大风', '雷暴']
 
+interface PendingTask {
+  id: string
+  content: string
+  sourceRecordId: string
+  sourceHandoverTime: string
+  status: 'pending' | 'completed'
+  completedRecordId?: string
+}
+
 const HandoverRecords: React.FC = () => {
   const { state, dispatch } = useApp()
   const [form] = Form.useForm()
@@ -42,10 +61,58 @@ const HandoverRecords: React.FC = () => {
   const [detailVisible, setDetailVisible] = useState(false)
   const [editingRecord, setEditingRecord] = useState<HandoverRecord | null>(null)
   const [viewingRecord, setViewingRecord] = useState<HandoverRecord | null>(null)
+  const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([])
+  const [selectedPendingTasks, setSelectedPendingTasks] = useState<string[]>([])
 
   const currentVoyage = state.voyages.find(v => v.id === state.currentVoyageId)
   const voyageShifts = state.shifts.filter(s => s.voyageId === state.currentVoyageId)
   const voyageRecords = state.handoverRecords.filter(h => h.voyageId === state.currentVoyageId)
+
+  useEffect(() => {
+    const tasks: PendingTask[] = []
+    const completedTaskIds = new Set<string>()
+
+    voyageRecords
+      .sort((a, b) => dayjs(a.handoverTime).valueOf() - dayjs(b.handoverTime).valueOf())
+      .forEach(record => {
+        if (record.pendingTasks && record.pendingTasks.trim() && record.pendingTasks !== '无') {
+          const taskId = `task-${record.id}`
+          tasks.push({
+            id: taskId,
+            content: record.pendingTasks,
+            sourceRecordId: record.id,
+            sourceHandoverTime: record.handoverTime,
+            status: 'pending'
+          })
+        }
+      })
+
+    voyageRecords.forEach(record => {
+      const lowerContent = record.pendingTasks?.toLowerCase() || ''
+      tasks.forEach(task => {
+        if (
+          task.status === 'pending' &&
+          record.id !== task.sourceRecordId &&
+          dayjs(record.handoverTime).isAfter(dayjs(task.sourceHandoverTime))
+        ) {
+          if (
+            lowerContent.includes('完成') ||
+            lowerContent.includes('已处理') ||
+            lowerContent.includes('已解决') ||
+            lowerContent.includes('关闭') ||
+            (lowerContent.includes(task.content.substring(0, 20)) &&
+             (lowerContent.includes('已完成') || lowerContent.includes('已处理')))
+          ) {
+            task.status = 'completed'
+            task.completedRecordId = record.id
+            completedTaskIds.add(task.id)
+          }
+        }
+      })
+    })
+
+    setPendingTasks(tasks)
+  }, [voyageRecords])
 
   const getShiftInfo = (shiftId: string) => {
     const shift = voyageShifts.find(s => s.id === shiftId)
@@ -60,10 +127,67 @@ const HandoverRecords: React.FC = () => {
   }
 
   const getAvailableShifts = () => {
+    const hasHandover = new Set(voyageRecords.map(r => r.shiftId))
     return voyageShifts
-      .filter(s => dayjs(s.endTime).isBefore(dayjs()))
+      .filter(s => dayjs(s.endTime).isBefore(dayjs()) && !hasHandover.has(s.id))
       .sort((a, b) => dayjs(b.startTime).valueOf() - dayjs(a.startTime).valueOf())
   }
+
+  const findNextShift = (currentShift: Shift) => {
+    return voyageShifts
+      .filter(s =>
+        s.crewId !== currentShift.crewId &&
+        s.date === currentShift.date &&
+        dayjs(s.startTime).isAfter(dayjs(currentShift.endTime))
+      )
+      .sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())[0]
+  }
+
+  const findLastHandoverForCrew = (crewId: string) => {
+    return voyageRecords
+      .filter(h => h.toCrewId === crewId)
+      .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())[0]
+  }
+
+  const handleAddFromShift = (shiftId: string, fromCrewId: string, toCrewId: string, startTime: string, endTime: string, pendingTasksStr: string) => {
+    setEditingRecord(null)
+    form.resetFields()
+    setSelectedPendingTasks([])
+
+    const availablePendingTasks = pendingTasks.filter((t: PendingTask) =>
+      t.status === 'pending' && (
+        voyageRecords.find(r => r.id === t.sourceRecordId)?.toCrewId === fromCrewId
+      )
+    )
+
+    if (availablePendingTasks.length > 0) {
+      setSelectedPendingTasks(availablePendingTasks.map(t => t.id))
+    }
+
+    form.setFieldsValue({
+      shiftId,
+      fromCrewId,
+      toCrewId,
+      handoverTime: dayjs(),
+      speed: '12',
+      weather: '晴',
+      channelNotes: '航道正常，无异常情况',
+      equipmentStatus: '设备运行正常',
+      pendingTasks: pendingTasksStr || '无'
+    })
+
+    setModalVisible(true)
+  }
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent
+      const { shiftId, fromCrewId, toCrewId, startTime, endTime, pendingTasks } = customEvent.detail
+      handleAddFromShift(shiftId, fromCrewId, toCrewId, startTime, endTime, pendingTasks)
+    }
+    window.addEventListener('navigateToHandover', handler)
+    return () => window.removeEventListener('navigateToHandover', handler)
+  }, [])
 
   const handleAdd = () => {
     const availableShifts = getAvailableShifts()
@@ -73,15 +197,57 @@ const HandoverRecords: React.FC = () => {
     }
     setEditingRecord(null)
     form.resetFields()
+    setSelectedPendingTasks([])
+
+    const firstShift = availableShifts[0]
+    const nextShift = findNextShift(firstShift)
+    const lastHandover = findLastHandoverForCrew(firstShift.crewId)
+
     form.setFieldsValue({
+      shiftId: firstShift.id,
+      toCrewId: nextShift?.crewId || '',
       handoverTime: dayjs(),
       speed: '12',
       weather: '晴',
       channelNotes: '航道正常，无异常情况',
       equipmentStatus: '设备运行正常',
-      pendingTasks: '无'
+      pendingTasks: lastHandover?.pendingTasks || '无'
     })
+
+    if (lastHandover?.pendingTasks && lastHandover.pendingTasks.trim() && lastHandover.pendingTasks !== '无') {
+      const taskId = `task-${lastHandover.id}`
+      if (pendingTasks.find(t => t.id === taskId && t.status === 'pending')) {
+        setSelectedPendingTasks([taskId])
+      }
+    }
+
     setModalVisible(true)
+  }
+
+  const handleShiftChange = (shiftId: string) => {
+    const shift = voyageShifts.find(s => s.id === shiftId)
+    if (shift) {
+      const nextShift = findNextShift(shift)
+      form.setFieldsValue({
+        toCrewId: nextShift?.crewId || ''
+      })
+
+      const lastHandover = findLastHandoverForCrew(shift.crewId)
+      if (lastHandover?.pendingTasks && lastHandover.pendingTasks.trim() && lastHandover.pendingTasks !== '无') {
+        form.setFieldsValue({
+          pendingTasks: lastHandover.pendingTasks
+        })
+        const taskId = `task-${lastHandover.id}`
+        if (pendingTasks.find(t => t.id === taskId && t.status === 'pending')) {
+          setSelectedPendingTasks([taskId])
+        }
+      } else {
+        form.setFieldsValue({
+          pendingTasks: '无'
+        })
+        setSelectedPendingTasks([])
+      }
+    }
   }
 
   const handleEdit = (record: HandoverRecord) => {
@@ -119,6 +285,19 @@ const HandoverRecords: React.FC = () => {
         return
       }
 
+      let pendingTasksContent = values.pendingTasks
+      if (selectedPendingTasks.length > 0) {
+        const selectedTasks = pendingTasks.filter(t => selectedPendingTasks.includes(t.id))
+        if (selectedTasks.length > 0) {
+          const trackedTasks = selectedTasks.map(t => `[跟进] ${t.content}`).join('\n\n')
+          if (pendingTasksContent === '无' || !pendingTasksContent) {
+            pendingTasksContent = trackedTasks
+          } else if (!pendingTasksContent.includes('[跟进]')) {
+            pendingTasksContent = `${trackedTasks}\n\n[新增]\n${pendingTasksContent}`
+          }
+        }
+      }
+
       const recordData: Omit<HandoverRecord, 'id' | 'createdAt'> = {
         voyageId: state.currentVoyageId!,
         shiftId: values.shiftId,
@@ -129,7 +308,7 @@ const HandoverRecords: React.FC = () => {
         weather: values.weather,
         channelNotes: values.channelNotes,
         equipmentStatus: values.equipmentStatus,
-        pendingTasks: values.pendingTasks,
+        pendingTasks: pendingTasksContent,
         remark: values.remark
       }
 
@@ -151,8 +330,26 @@ const HandoverRecords: React.FC = () => {
         message.success('交接记录已创建')
       }
       setModalVisible(false)
+      setSelectedPendingTasks([])
     })
   }
+
+  const activePendingTasks = pendingTasks.filter(t => t.status === 'pending')
+  const completedPendingTasks = pendingTasks.filter(t => t.status === 'completed')
+
+  const currentShiftId = Form.useWatch('shiftId', form)
+  const currentShift = voyageShifts.find(s => s.id === currentShiftId)
+  const relevantPendingTasks = currentShift
+    ? pendingTasks.filter(t => {
+      const sourceRecord = voyageRecords.find(r => r.id === t.sourceRecordId)
+      return (
+        t.status === 'pending' &&
+        sourceRecord &&
+        (sourceRecord.toCrewId === currentShift.crewId ||
+         sourceRecord.fromCrewId === currentShift.crewId)
+      )
+    })
+    : []
 
   const columns = [
     {
@@ -205,11 +402,23 @@ const HandoverRecords: React.FC = () => {
       render: (speed: string) => `${speed} 节`
     },
     {
-      title: '天气',
-      dataIndex: 'weather',
-      key: 'weather',
-      width: 80,
-      render: (weather: string) => <Tag>{weather}</Tag>
+      title: '待办事项',
+      dataIndex: 'pendingTasks',
+      key: 'pending',
+      width: 120,
+      render: (tasks: string) => {
+        if (!tasks || tasks === '无') {
+          return <Tag color="success">无</Tag>
+        }
+        const isCompleted = pendingTasks.find(t =>
+          t.content === tasks && t.status === 'completed'
+        )
+        return (
+          <Tag color={isCompleted ? 'success' : 'warning'}>
+            {isCompleted ? '已跟进' : '待跟进'}
+          </Tag>
+        )
+      }
     },
     {
       title: '操作',
@@ -252,13 +461,34 @@ const HandoverRecords: React.FC = () => {
     )
   }
 
+  const pendingForCurrentCrew = currentShift
+    ? activePendingTasks.filter(t => {
+      const sourceRecord = voyageRecords.find(r => r.id === t.sourceRecordId)
+      return sourceRecord?.toCrewId === currentShift.crewId
+    }).length
+    : 0
+
   return (
     <div className="page-container">
       <div className="page-header">
         <h2 className="page-title">交接记录</h2>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
-          新增交接
-        </Button>
+        <Space>
+          {activePendingTasks.length > 0 && (
+            <Tooltip title={`有 ${activePendingTasks.length} 项待办事项需要跟进`}>
+              <Badge count={activePendingTasks.length} size="small">
+                <Button
+                  icon={<WarningOutlined />}
+                  onClick={() => document.getElementById('pending-tasks-section')?.scrollIntoView({ behavior: 'smooth' })}
+                >
+                  待办提醒
+                </Button>
+              </Badge>
+            </Tooltip>
+          )}
+          <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>
+            新增交接
+          </Button>
+        </Space>
       </div>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -270,32 +500,83 @@ const HandoverRecords: React.FC = () => {
         </Col>
         <Col xs={12} sm={6}>
           <div className="stat-card">
-            <div className="stat-value">{voyageShifts.length}</div>
-            <div className="stat-label">总班次</div>
+            <div className="stat-value">{activePendingTasks.length}</div>
+            <div className="stat-label" style={{ color: '#faad14' }}>待办事项</div>
           </div>
         </Col>
         <Col xs={12} sm={6}>
           <div className="stat-card">
             <div className="stat-value" style={{ color: '#52c41a' }}>
-              {voyageShifts.filter(s => dayjs(s.endTime).isBefore(dayjs())).length}
+              {completedPendingTasks.length}
             </div>
-            <div className="stat-label">已完成班次</div>
+            <div className="stat-label">已完成事项</div>
           </div>
         </Col>
         <Col xs={12} sm={6}>
           <div className="stat-card">
-            <div className="stat-value" style={{ color: '#faad14' }}>
-              {voyageShifts.filter(s => dayjs(s.endTime).isAfter(dayjs())).length}
+            <div className="stat-value" style={{ color: '#1890ff' }}>
+              {getAvailableShifts().length}
             </div>
             <div className="stat-label">待交接班次</div>
           </div>
         </Col>
       </Row>
 
+      {activePendingTasks.length > 0 && (
+        <Card
+          id="pending-tasks-section"
+          title={
+            <Space>
+              <WarningOutlined style={{ color: '#faad14' }} />
+              <span>待办事项跟踪</span>
+              <Badge count={activePendingTasks.length} size="small" />
+            </Space>
+          }
+          style={{ marginBottom: 16 }}
+          size="small"
+        >
+          <List
+            size="small"
+            dataSource={activePendingTasks}
+            renderItem={(task) => {
+              const sourceRecord = voyageRecords.find(r => r.id === task.sourceRecordId)
+              return (
+                <List.Item
+                  actions={[
+                    <Tag key="from" color="blue">
+                      {getCrewName(sourceRecord?.toCrewId || '')} 负责
+                    </Tag>,
+                    <Tag key="time">
+                      <ClockCircleOutlined style={{ marginRight: 4 }} />
+                      {formatDate(task.sourceHandoverTime)}
+                    </Tag>
+                  ]}
+                >
+                  <List.Item.Meta
+                    avatar={<Badge status="warning" />}
+                    title={
+                      <span style={{ fontSize: 13 }}>
+                        {task.content}
+                      </span>
+                    }
+                    description={
+                      <span style={{ fontSize: 12, color: '#999' }}>
+                        来源于 {formatDateTime(task.sourceHandoverTime)} 的交接记录
+                      </span>
+                    }
+                  />
+                </List.Item>
+              )
+            }}
+          />
+        </Card>
+      )}
+
       <Card title="交接记录列表">
         <Table
           columns={columns}
-          dataSource={voyageRecords}
+          dataSource={voyageRecords
+            .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())}
           rowKey="id"
           bordered
           pagination={{ pageSize: 10 }}
@@ -316,8 +597,26 @@ const HandoverRecords: React.FC = () => {
                 </Col>
                 <Col xs={24}>
                   <div>
-                    <strong style={{ color: '#666' }}>未完成事项：</strong>
-                    <p style={{ marginTop: 4 }}>{record.pendingTasks || '无'}</p>
+                    <strong style={{
+                      color: record.pendingTasks?.trim() && record.pendingTasks !== '无'
+                        ? '#faad14'
+                        : '#666'
+                    }}>
+                      未完成事项：
+                    </strong>
+                    <p style={{
+                      marginTop: 4,
+                      background: record.pendingTasks?.trim() && record.pendingTasks !== '无'
+                        ? '#fff7e6'
+                        : 'transparent',
+                      padding: record.pendingTasks?.trim() && record.pendingTasks !== '无'
+                        ? '8px 12px'
+                        : 0,
+                      borderRadius: 4,
+                      whiteSpace: 'pre-wrap'
+                    }}>
+                      {record.pendingTasks || '无'}
+                    </p>
                   </div>
                 </Col>
                 {record.remark && (
@@ -335,22 +634,63 @@ const HandoverRecords: React.FC = () => {
       </Card>
 
       <Modal
-        title={editingRecord ? '编辑交接记录' : '新增交接记录'}
+        title={
+          <Space>
+            <FileTextOutlined />
+            <span>{editingRecord ? '编辑交接记录' : '新增交接记录'}</span>
+          </Space>
+        }
         open={modalVisible}
         onOk={handleSubmit}
-        onCancel={() => setModalVisible(false)}
-        width={700}
+        onCancel={() => {
+          setModalVisible(false)
+          setSelectedPendingTasks([])
+        }}
+        width={750}
         maskClosable={false}
       >
+        {relevantPendingTasks.length > 0 && !editingRecord && (
+          <Alert
+            message={`有 ${relevantPendingTasks.length} 项待办事项需要跟进`}
+            description={
+              <div>
+                {relevantPendingTasks.slice(0, 3).map(task => (
+                  <div key={task.id} style={{ fontSize: 12 }}>
+                    • {task.content.substring(0, 50)}...
+                  </div>
+                ))}
+                {relevantPendingTasks.length > 3 && (
+                  <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+                    ...还有 {relevantPendingTasks.length - 3} 项
+                  </div>
+                )}
+              </div>
+            }
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
         <Form form={form} layout="vertical">
           <Row gutter={16}>
             <Col xs={24} md={12}>
               <Form.Item
                 name="shiftId"
-                label="选择班次"
+                label={
+                  <Space>
+                    选择班次
+                    <Tooltip title="选择已完成的值班班次">
+                      <span style={{ color: '#999', fontSize: 12 }}>(自动带出交班人)</span>
+                    </Tooltip>
+                  </Space>
+                }
                 rules={[{ required: true, message: '请选择交接班次' }]}
               >
-                <Select placeholder="请选择交接的班次">
+                <Select
+                  placeholder="请选择交接的班次"
+                  onChange={handleShiftChange}
+                >
                   {getAvailableShifts().map(shift => {
                     const crew = state.crews.find(c => c.id === shift.crewId)
                     const position = state.positions.find(p => p.id === shift.positionId)
@@ -366,15 +706,24 @@ const HandoverRecords: React.FC = () => {
             <Col xs={24} md={12}>
               <Form.Item
                 name="toCrewId"
-                label="接班人员"
+                label={
+                  <Space>
+                    接班人员
+                    <Tooltip title="系统会自动推荐下一班次人员">
+                      <span style={{ color: '#999', fontSize: 12 }}>(推荐下一班)</span>
+                    </Tooltip>
+                  </Space>
+                }
                 rules={[{ required: true, message: '请选择接班人员' }]}
               >
                 <Select placeholder="请选择接班人员">
-                  {state.crews.map(crew => (
-                    <Option key={crew.id} value={crew.id}>
-                      {crew.name} - {crew.position}
-                    </Option>
-                  ))}
+                  {state.crews
+                    .filter(c => currentShift ? c.id !== currentShift.crewId : true)
+                    .map(crew => (
+                      <Option key={crew.id} value={crew.id}>
+                        {crew.name} - {crew.position}
+                      </Option>
+                    ))}
                 </Select>
               </Form.Item>
             </Col>
@@ -414,6 +763,48 @@ const HandoverRecords: React.FC = () => {
               </Form.Item>
             </Col>
           </Row>
+
+          {relevantPendingTasks.length > 0 && !editingRecord && (
+            <Form.Item
+              label={
+                <Space>
+                  <WarningOutlined style={{ color: '#faad14' }} />
+                  <span>待办事项跟进</span>
+                  <span style={{ color: '#999', fontSize: 12, fontWeight: 'normal' }}>
+                    (勾选后将自动带入未完成事项)
+                  </span>
+                </Space>
+              }
+            >
+              <List
+                size="small"
+                dataSource={relevantPendingTasks}
+                renderItem={(task) => (
+                  <List.Item>
+                    <Checkbox
+                      checked={selectedPendingTasks.includes(task.id)}
+                      onChange={(e: CheckboxChangeEvent) => {
+                        if (e.target.checked) {
+                          setSelectedPendingTasks([...selectedPendingTasks, task.id])
+                        } else {
+                          setSelectedPendingTasks(selectedPendingTasks.filter(id => id !== task.id))
+                        }
+                      }}
+                    >
+                      <Space>
+                        <Badge status="warning" />
+                        <span style={{ fontSize: 13 }}>{task.content}</span>
+                        <Tag color="blue" style={{ marginLeft: 'auto' }}>
+                          {formatDate(task.sourceHandoverTime)}
+                        </Tag>
+                      </Space>
+                    </Checkbox>
+                  </List.Item>
+                )}
+              />
+            </Form.Item>
+          )}
+
           <Divider orientation="left" style={{ margin: '8px 0', fontSize: 14, fontWeight: 600 }}>
             交接详情
           </Divider>
@@ -439,12 +830,19 @@ const HandoverRecords: React.FC = () => {
           </Form.Item>
           <Form.Item
             name="pendingTasks"
-            label="未完成事项"
+            label={
+              <Space>
+                未完成事项
+                {selectedPendingTasks.length > 0 && (
+                  <Tag color="orange">{selectedPendingTasks.length}项跟进中</Tag>
+                )}
+              </Space>
+            }
             rules={[{ required: true, message: '请填写未完成事项' }]}
           >
             <TextArea
-              rows={3}
-              placeholder="请描述需要下一班次继续处理的事项"
+              rows={4}
+              placeholder="请描述需要下一班次继续处理的事项，勾选上方待办事项将自动带入"
             />
           </Form.Item>
           <Form.Item name="remark" label="其他备注">
@@ -458,7 +856,7 @@ const HandoverRecords: React.FC = () => {
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
         footer={null}
-        width={700}
+        width={750}
       >
         {viewingRecord && (
           <div>
@@ -508,9 +906,45 @@ const HandoverRecords: React.FC = () => {
             </div>
             <div style={{ marginBottom: 12 }}>
               <strong style={{ display: 'block', marginBottom: 4 }}>未完成事项：</strong>
-              <div style={{ background: '#fff7e6', padding: 12, borderRadius: 4 }}>
-                {viewingRecord.pendingTasks}
+              <div style={{ background: '#fff7e6', padding: 12, borderRadius: 4, whiteSpace: 'pre-wrap' }}>
+                {viewingRecord.pendingTasks || '无'}
               </div>
+              {(() => {
+                const task = pendingTasks.find(t =>
+                  t.sourceRecordId === viewingRecord.id &&
+                  t.content === viewingRecord.pendingTasks
+                )
+                if (task) {
+                  return (
+                    <div style={{
+                      marginTop: 8,
+                      padding: '8px 12px',
+                      background: task.status === 'completed' ? '#f6ffed' : '#fff7e6',
+                      borderRadius: 4,
+                      fontSize: 12
+                    }}>
+                      <Space>
+                        {task.status === 'completed' ? (
+                          <>
+                            <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                            <span style={{ color: '#52c41a' }}>
+                              已跟进（{formatDateTime(task.completedRecordId
+                                ? voyageRecords.find(r => r.id === task.completedRecordId)?.handoverTime || ''
+                                : '')}）
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <ClockCircleOutlined style={{ color: '#faad14' }} />
+                            <span style={{ color: '#faad14' }}>待跟进中</span>
+                          </>
+                        )}
+                      </Space>
+                    </div>
+                  )
+                }
+                return null
+              })()}
             </div>
             {viewingRecord.remark && (
               <div>
@@ -525,6 +959,10 @@ const HandoverRecords: React.FC = () => {
       </Modal>
     </div>
   )
+}
+
+function formatDate(dateStr: string): string {
+  return dayjs(dateStr).format('MM-DD')
 }
 
 export default HandoverRecords

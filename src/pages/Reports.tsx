@@ -14,7 +14,8 @@ import {
   DatePicker,
   Select,
   Form,
-  Descriptions
+  Descriptions,
+  Input
 } from 'antd'
 import {
   ExportOutlined,
@@ -41,8 +42,13 @@ const { Option } = Select
 const Reports: React.FC = () => {
   const { state } = useApp()
   const [form] = Form.useForm()
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null)
-  const [exportType, setExportType] = useState<'all' | 'shifts' | 'handover' | 'fatigue'>('all')
+  const [activeTab, setActiveTab] = useState('summary')
+  const [shiftDateRange, setShiftDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null)
+  const [handoverDateRange, setHandoverDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null)
+  const [shiftCrewFilter, setShiftCrewFilter] = useState<string[]>([])
+  const [handoverCrewFilter, setHandoverCrewFilter] = useState<string[]>([])
+  const [fatigueRiskFilter, setFatigueRiskFilter] = useState<string>('all')
+  const [exporting, setExporting] = useState(false)
 
   const currentVoyage = state.voyages.find(v => v.id === state.currentVoyageId)
   const voyageShifts = state.shifts.filter(s => s.voyageId === state.currentVoyageId)
@@ -50,32 +56,50 @@ const Reports: React.FC = () => {
   const voyageIncidents = state.incidents.filter(i => i.voyageId === state.currentVoyageId)
 
   const filteredShifts = useMemo(() => {
-    if (!dateRange) return voyageShifts
-    return voyageShifts.filter(s => {
-      const shiftDate = dayjs(s.date)
-      return shiftDate.isAfter(dateRange[0].startOf('day')) &&
-             shiftDate.isBefore(dateRange[1].endOf('day'))
-    })
-  }, [voyageShifts, dateRange])
+    let result = [...voyageShifts]
+    if (shiftDateRange) {
+      result = result.filter(s => {
+        const shiftDate = dayjs(s.date)
+        return shiftDate.isAfter(shiftDateRange[0].startOf('day')) &&
+               shiftDate.isBefore(shiftDateRange[1].endOf('day'))
+      })
+    }
+    if (shiftCrewFilter.length > 0) {
+      result = result.filter(s => shiftCrewFilter.includes(s.crewId))
+    }
+    return result.sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())
+  }, [voyageShifts, shiftDateRange, shiftCrewFilter])
 
   const filteredRecords = useMemo(() => {
-    if (!dateRange) return voyageRecords
-    return voyageRecords.filter(h => {
-      const recordDate = dayjs(h.handoverTime)
-      return recordDate.isAfter(dateRange[0].startOf('day')) &&
-             recordDate.isBefore(dateRange[1].endOf('day'))
-    })
-  }, [voyageRecords, dateRange])
+    let result = [...voyageRecords]
+    if (handoverDateRange) {
+      result = result.filter(h => {
+        const recordDate = dayjs(h.handoverTime)
+        return recordDate.isAfter(handoverDateRange[0].startOf('day')) &&
+               recordDate.isBefore(handoverDateRange[1].endOf('day'))
+      })
+    }
+    if (handoverCrewFilter.length > 0) {
+      result = result.filter(h =>
+        handoverCrewFilter.includes(h.fromCrewId) || handoverCrewFilter.includes(h.toCrewId)
+      )
+    }
+    return result.sort((a, b) => dayjs(a.handoverTime).valueOf() - dayjs(b.handoverTime).valueOf())
+  }, [voyageRecords, handoverDateRange, handoverCrewFilter])
 
   const fatigueInfoList = useMemo((): FatigueInfo[] => {
     if (!currentVoyage) return []
-    return state.crews.map(crew =>
+    let result = state.crews.map(crew =>
       calculateFatigueInfo(crew, voyageShifts, currentVoyage.departureTime)
     ).sort((a, b) => {
       const levelOrder = { high: 0, medium: 1, low: 2 }
       return levelOrder[a.riskLevel] - levelOrder[b.riskLevel]
     })
-  }, [state.crews, voyageShifts, currentVoyage])
+    if (fatigueRiskFilter !== 'all') {
+      result = result.filter(f => f.riskLevel === fatigueRiskFilter)
+    }
+    return result
+  }, [state.crews, voyageShifts, currentVoyage, fatigueRiskFilter])
 
   const getCrewName = (crewId: string) => {
     return state.crews.find(c => c.id === crewId)?.name || '未知'
@@ -89,129 +113,134 @@ const Reports: React.FC = () => {
     return state.positions.find(p => p.id === positionId)?.type || 'bridge'
   }
 
-  const handleExport = async () => {
+  const createWorksheet = (data: any[], cols: number[], sheetName: string, wb: XLSX.WorkBook) => {
+    const ws = XLSX.utils.json_to_sheet(data)
+    ws['!cols'] = cols.map(wch => ({ wch }))
+    XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  }
+
+  const buildShiftExportData = () => filteredShifts.map(s => ({
+    '日期': s.date,
+    '岗位': getPositionName(s.positionId),
+    '岗位类型': getPositionType(s.positionId) === 'bridge' ? '驾驶台' : '机舱',
+    '船员': getCrewName(s.crewId),
+    '开始时间': formatTime(s.startTime),
+    '结束时间': formatTime(s.endTime),
+    '时长(小时)': getShiftDurationHours(s.startTime, s.endTime).toFixed(1)
+  }))
+
+  const buildHandoverExportData = () => filteredRecords.map(h => ({
+    '交接时间': formatDateTime(h.handoverTime),
+    '岗位': getPositionName(voyageShifts.find(s => s.id === h.shiftId)?.positionId || ''),
+    '交班人': getCrewName(h.fromCrewId),
+    '接班人': getCrewName(h.toCrewId),
+    '航速(节)': h.speed,
+    '天气': h.weather,
+    '航道提示': h.channelNotes,
+    '设备状态': h.equipmentStatus,
+    '未完成事项': h.pendingTasks,
+    '备注': h.remark || ''
+  }))
+
+  const buildFatigueExportData = () => fatigueInfoList.map(f => ({
+    '船员': f.crewName,
+    '总工作时长(小时)': f.totalHours,
+    '最长连续工作(小时)': f.continuousHours,
+    '休息时长(小时)': f.restHours,
+    '班次数量': f.shiftCount,
+    '风险等级': f.riskLevel === 'low' ? '低' : f.riskLevel === 'medium' ? '中' : '高',
+    '预警信息': f.warnings.join('；')
+  }))
+
+  const buildIncidentExportData = () => voyageIncidents
+    .sort((a, b) => dayjs(a.reportedTime).valueOf() - dayjs(b.reportedTime).valueOf())
+    .map(i => ({
+      '标题': i.title,
+      '类型': i.type === 'safety' ? '安全事故' : i.type === 'equipment' ? '设备故障' :
+              i.type === 'navigation' ? '航行异常' : '其他',
+      '级别': i.level === 'minor' ? '轻微' : i.level === 'moderate' ? '一般' : '严重',
+      '状态': i.status === 'pending' ? '待处理' : i.status === 'processing' ? '处理中' : '已解决',
+      '报告时间': formatDateTime(i.reportedTime),
+      '关联人员': getCrewName(i.crewId || ''),
+      '关联班次': voyageShifts.find(s => s.id === i.shiftId)
+        ? `${formatTime(voyageShifts.find(s => s.id === i.shiftId)!.startTime)} - ${formatTime(voyageShifts.find(s => s.id === i.shiftId)!.endTime)}`
+        : '',
+      '描述': i.description,
+      '处理结果': i.resolution || '',
+      '解决时间': i.resolvedTime ? formatDateTime(i.resolvedTime) : ''
+    }))
+
+  const buildSummaryExportData = () => [{
+    '航次名称': currentVoyage?.name || '',
+    '船舶名称': currentVoyage?.vesselName || '',
+    '航线': `${currentVoyage?.departurePort || ''} → ${currentVoyage?.arrivalPort || ''}`,
+    '出发时间': currentVoyage?.departureTime ? formatDateTime(currentVoyage.departureTime) : '',
+    '预计到达': currentVoyage?.arrivalTime ? formatDateTime(currentVoyage.arrivalTime) : '未设置',
+    '船员人数': state.crews.length,
+    '总班次': voyageShifts.length,
+    '交接记录': voyageRecords.length,
+    '异常事件': voyageIncidents.length,
+    '高风险人数': fatigueInfoList.filter(f => f.riskLevel === 'high').length,
+    '中风险人数': fatigueInfoList.filter(f => f.riskLevel === 'medium').length,
+    '低风险人数': fatigueInfoList.filter(f => f.riskLevel === 'low').length
+  }]
+
+  const handleExport = async (exportType: 'all' | 'shifts' | 'handover' | 'fatigue') => {
     if (!currentVoyage) {
       message.error('请先选择航次')
       return
     }
 
+    if (exportType === 'shifts' && filteredShifts.length === 0) {
+      message.warning('当前筛选条件下没有可导出的值班数据')
+      return
+    }
+    if (exportType === 'handover' && filteredRecords.length === 0) {
+      message.warning('当前筛选条件下没有可导出的交接记录')
+      return
+    }
+    if (exportType === 'fatigue' && fatigueInfoList.length === 0) {
+      message.warning('当前筛选条件下没有可导出的疲劳数据')
+      return
+    }
+
+    setExporting(true)
     try {
       const wb = XLSX.utils.book_new()
 
-      if (exportType === 'all' || exportType === 'shifts') {
-        const shiftData = filteredShifts
-          .sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())
-          .map(s => ({
-            '日期': s.date,
-            '岗位': getPositionName(s.positionId),
-            '岗位类型': getPositionType(s.positionId) === 'bridge' ? '驾驶台' : '机舱',
-            '船员': getCrewName(s.crewId),
-            '开始时间': formatTime(s.startTime),
-            '结束时间': formatTime(s.endTime),
-            '时长(小时)': getShiftDurationHours(s.startTime, s.endTime).toFixed(1)
-          }))
-
-        const ws1 = XLSX.utils.json_to_sheet(shiftData)
-        ws1['!cols'] = [
-          { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 12 },
-          { wch: 10 }, { wch: 10 }, { wch: 12 }
-        ]
-        XLSX.utils.book_append_sheet(wb, ws1, '值班表')
-      }
-
-      if (exportType === 'all' || exportType === 'handover') {
-        const handoverData = filteredRecords
-          .sort((a, b) => dayjs(a.handoverTime).valueOf() - dayjs(b.handoverTime).valueOf())
-          .map(h => ({
-            '交接时间': formatDateTime(h.handoverTime),
-            '岗位': getPositionName(voyageShifts.find(s => s.id === h.shiftId)?.positionId || ''),
-            '交班人': getCrewName(h.fromCrewId),
-            '接班人': getCrewName(h.toCrewId),
-            '航速(节)': h.speed,
-            '天气': h.weather,
-            '航道提示': h.channelNotes,
-            '设备状态': h.equipmentStatus,
-            '未完成事项': h.pendingTasks,
-            '备注': h.remark || ''
-          }))
-
-        const ws2 = XLSX.utils.json_to_sheet(handoverData)
-        ws2['!cols'] = [
-          { wch: 18 }, { wch: 12 }, { wch: 10 }, { wch: 10 },
-          { wch: 10 }, { wch: 8 }, { wch: 30 }, { wch: 30 },
-          { wch: 30 }, { wch: 20 }
-        ]
-        XLSX.utils.book_append_sheet(wb, ws2, '交接记录')
-      }
-
-      if (exportType === 'all' || exportType === 'fatigue') {
-        const fatigueData = fatigueInfoList.map(f => ({
-          '船员': f.crewName,
-          '总工作时长(小时)': f.totalHours,
-          '最长连续工作(小时)': f.continuousHours,
-          '休息时长(小时)': f.restHours,
-          '班次数量': f.shiftCount,
-          '风险等级': f.riskLevel === 'low' ? '低' : f.riskLevel === 'medium' ? '中' : '高',
-          '预警信息': f.warnings.join('；')
-        }))
-
-        const ws3 = XLSX.utils.json_to_sheet(fatigueData)
-        ws3['!cols'] = [
-          { wch: 12 }, { wch: 16 }, { wch: 18 }, { wch: 14 },
-          { wch: 10 }, { wch: 10 }, { wch: 40 }
-        ]
-        XLSX.utils.book_append_sheet(wb, ws3, '疲劳风险')
-      }
-
       if (exportType === 'all') {
-        const incidentData = voyageIncidents
-          .sort((a, b) => dayjs(a.reportedTime).valueOf() - dayjs(b.reportedTime).valueOf())
-          .map(i => ({
-            '标题': i.title,
-            '类型': i.type === 'safety' ? '安全事故' : i.type === 'equipment' ? '设备故障' :
-                    i.type === 'navigation' ? '航行异常' : '其他',
-            '级别': i.level === 'minor' ? '轻微' : i.level === 'moderate' ? '一般' : '严重',
-            '状态': i.status === 'pending' ? '待处理' : i.status === 'processing' ? '处理中' : '已解决',
-            '报告时间': formatDateTime(i.reportedTime),
-            '关联人员': getCrewName(i.crewId || ''),
-            '描述': i.description,
-            '处理结果': i.resolution || '',
-            '解决时间': i.resolvedTime ? formatDateTime(i.resolvedTime) : ''
-          }))
-
-        const ws4 = XLSX.utils.json_to_sheet(incidentData)
-        ws4['!cols'] = [
-          { wch: 20 }, { wch: 10 }, { wch: 8 }, { wch: 10 },
-          { wch: 18 }, { wch: 10 }, { wch: 40 }, { wch: 40 }, { wch: 18 }
-        ]
-        XLSX.utils.book_append_sheet(wb, ws4, '异常事件')
-
-        const summaryData = [{
-          '航次名称': currentVoyage.name,
-          '船舶名称': currentVoyage.vesselName,
-          '航线': `${currentVoyage.departurePort} → ${currentVoyage.arrivalPort}`,
-          '出发时间': formatDateTime(currentVoyage.departureTime),
-          '预计到达': currentVoyage.arrivalTime ? formatDateTime(currentVoyage.arrivalTime) : '未设置',
-          '船员人数': state.crews.length,
-          '总班次': voyageShifts.length,
-          '交接记录': voyageRecords.length,
-          '异常事件': voyageIncidents.length,
-          '高风险人数': fatigueInfoList.filter(f => f.riskLevel === 'high').length,
-          '中风险人数': fatigueInfoList.filter(f => f.riskLevel === 'medium').length,
-          '低风险人数': fatigueInfoList.filter(f => f.riskLevel === 'low').length
-        }]
-
-        const ws5 = XLSX.utils.json_to_sheet(summaryData)
-        ws5['!cols'] = [
-          { wch: 15 }, { wch: 15 }, { wch: 25 }, { wch: 20 },
-          { wch: 20 }, { wch: 10 }, { wch: 10 }, { wch: 12 },
-          { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 }
-        ]
-        XLSX.utils.book_append_sheet(wb, ws5, '航次摘要')
+        createWorksheet(buildSummaryExportData(),
+          [15, 15, 25, 20, 20, 10, 10, 12, 10, 12, 12, 12], '航次摘要', wb)
+        createWorksheet(buildShiftExportData(),
+          [12, 12, 10, 12, 10, 10, 12], '值班表', wb)
+        createWorksheet(buildHandoverExportData(),
+          [18, 12, 10, 10, 10, 8, 30, 30, 30, 20], '交接记录', wb)
+        createWorksheet(buildFatigueExportData(),
+          [12, 16, 18, 14, 10, 10, 40], '疲劳风险', wb)
+        createWorksheet(buildIncidentExportData(),
+          [20, 10, 8, 10, 18, 10, 18, 40, 40, 18], '异常事件', wb)
+      } else if (exportType === 'shifts') {
+        createWorksheet(buildShiftExportData(),
+          [12, 12, 10, 12, 10, 10, 12], '值班表', wb)
+      } else if (exportType === 'handover') {
+        createWorksheet(buildHandoverExportData(),
+          [18, 12, 10, 10, 10, 8, 30, 30, 30, 20], '交接记录', wb)
+      } else if (exportType === 'fatigue') {
+        createWorksheet(buildFatigueExportData(),
+          [12, 16, 18, 14, 10, 10, 40], '疲劳风险', wb)
       }
 
       const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
-      const fileName = `${currentVoyage.name}_值班报表_${dayjs().format('YYYYMMDD_HHmm')}.xlsx`
+
+      const typeNames = {
+        all: '完整报表',
+        shifts: '值班表',
+        handover: '交接记录',
+        fatigue: '疲劳报告'
+      }
+
+      const filterSuffix = exportType !== 'all' ? `_${activeTab}` : ''
+      const fileName = `${currentVoyage.name}_${typeNames[exportType]}_${dayjs().format('YYYYMMDD_HHmm')}.xlsx`
 
       const result = await window.electronAPI.saveFile({
         fileName,
@@ -219,13 +248,19 @@ const Reports: React.FC = () => {
       })
 
       if (result.success) {
-        message.success(`报表已导出到：${result.path}`)
+        const countText = exportType === 'shifts' ? `${filteredShifts.length}条记录`
+          : exportType === 'handover' ? `${filteredRecords.length}条记录`
+          : exportType === 'fatigue' ? `${fatigueInfoList.length}条记录`
+          : '全部数据'
+        message.success(`${typeNames[exportType]}已导出到：${result.path}（${countText}）`)
       } else {
         message.info('已取消导出')
       }
     } catch (e) {
       console.error('Export error:', e)
       message.error('导出失败，请重试')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -464,26 +499,52 @@ const Reports: React.FC = () => {
     },
     {
       key: 'shifts',
-      label: '值班表',
+      label: (
+        <Space>
+          值班表
+          {shiftDateRange && <Tag color="blue">已筛选</Tag>}
+          {shiftCrewFilter.length > 0 && <Tag color="green">{shiftCrewFilter.length}人</Tag>}
+        </Space>
+      ),
       children: (
         <div>
           <Card
             title="值班安排"
             extra={
-              <Space>
+              <Space wrap>
+                <Select
+                  mode="multiple"
+                  placeholder="筛选船员"
+                  style={{ minWidth: 180 }}
+                  value={shiftCrewFilter}
+                  onChange={setShiftCrewFilter}
+                  allowClear
+                >
+                  {state.crews.map(crew => (
+                    <Option key={crew.id} value={crew.id}>{crew.name}</Option>
+                  ))}
+                </Select>
                 <RangePicker
-                  value={dateRange}
-                  onChange={(dates) => setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+                  value={shiftDateRange}
+                  onChange={(dates) => setShiftDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)}
                   style={{ width: 280 }}
                 />
                 <Button
-                  icon={<ExportOutlined />}
+                  type="default"
                   onClick={() => {
-                    setExportType('shifts')
-                    handleExport()
+                    setShiftDateRange(null)
+                    setShiftCrewFilter([])
                   }}
                 >
-                  导出值班表
+                  清除筛选
+                </Button>
+                <Button
+                  icon={<ExportOutlined />}
+                  type="primary"
+                  loading={exporting}
+                  onClick={() => handleExport('shifts')}
+                >
+                  导出值班表 ({filteredShifts.length})
                 </Button>
               </Space>
             }
@@ -494,7 +555,7 @@ const Reports: React.FC = () => {
                 .sort((a, b) => dayjs(b.startTime).valueOf() - dayjs(a.startTime).valueOf())}
               rowKey="id"
               bordered
-              pagination={{ pageSize: 20 }}
+              pagination={{ pageSize: 20, showSizeChanger: true }}
             />
           </Card>
         </div>
@@ -502,21 +563,54 @@ const Reports: React.FC = () => {
     },
     {
       key: 'handover',
-      label: '交接摘要',
+      label: (
+        <Space>
+          交接摘要
+          {handoverDateRange && <Tag color="blue">已筛选</Tag>}
+          {handoverCrewFilter.length > 0 && <Tag color="green">{handoverCrewFilter.length}人</Tag>}
+        </Space>
+      ),
       children: (
         <div>
           <Card
             title="交接记录摘要"
             extra={
-              <Button
-                icon={<ExportOutlined />}
-                onClick={() => {
-                  setExportType('handover')
-                  handleExport()
-                }}
-              >
-                导出交接记录
-              </Button>
+              <Space wrap>
+                <Select
+                  mode="multiple"
+                  placeholder="筛选船员"
+                  style={{ minWidth: 180 }}
+                  value={handoverCrewFilter}
+                  onChange={setHandoverCrewFilter}
+                  allowClear
+                >
+                  {state.crews.map(crew => (
+                    <Option key={crew.id} value={crew.id}>{crew.name}</Option>
+                  ))}
+                </Select>
+                <RangePicker
+                  value={handoverDateRange}
+                  onChange={(dates) => setHandoverDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+                  style={{ width: 280 }}
+                />
+                <Button
+                  type="default"
+                  onClick={() => {
+                    setHandoverDateRange(null)
+                    setHandoverCrewFilter([])
+                  }}
+                >
+                  清除筛选
+                </Button>
+                <Button
+                  icon={<ExportOutlined />}
+                  type="primary"
+                  loading={exporting}
+                  onClick={() => handleExport('handover')}
+                >
+                  导出交接记录 ({filteredRecords.length})
+                </Button>
+              </Space>
             }
           >
             {filteredRecords.length === 0 ? (
@@ -525,36 +619,52 @@ const Reports: React.FC = () => {
               <div>
                 {filteredRecords
                   .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())
-                  .map(record => (
-                    <Card
-                      key={record.id}
-                      size="small"
-                      style={{ marginBottom: 12 }}
-                      title={
-                        <Space>
-                          <span>{formatDateTime(record.handoverTime)}</span>
-                          <Tag>{getCrewName(record.fromCrewId)} → {getCrewName(record.toCrewId)}</Tag>
-                          <Tag color="blue">航速: {record.speed}节</Tag>
-                          <Tag>{record.weather}</Tag>
-                        </Space>
-                      }
-                    >
-                      <Row gutter={[16, 8]}>
-                        <Col xs={24} md={12}>
-                          <strong style={{ color: '#666' }}>航道提示：</strong>
-                          <p style={{ marginTop: 4 }}>{record.channelNotes}</p>
-                        </Col>
-                        <Col xs={24} md={12}>
-                          <strong style={{ color: '#666' }}>设备状态：</strong>
-                          <p style={{ marginTop: 4 }}>{record.equipmentStatus}</p>
-                        </Col>
-                        <Col xs={24}>
-                          <strong style={{ color: '#faad14' }}>未完成事项：</strong>
-                          <p style={{ marginTop: 4 }}>{record.pendingTasks}</p>
-                        </Col>
-                      </Row>
-                    </Card>
-                  ))}
+                  .map(record => {
+                    const pendingTaskCount = record.pendingTasks?.trim() ? 1 : 0
+                    return (
+                      <Card
+                        key={record.id}
+                        size="small"
+                        style={{ marginBottom: 12 }}
+                        title={
+                          <Space wrap>
+                            <span>{formatDateTime(record.handoverTime)}</span>
+                            <Tag>{getCrewName(record.fromCrewId)} → {getCrewName(record.toCrewId)}</Tag>
+                            <Tag color="blue">航速: {record.speed}节</Tag>
+                            <Tag>{record.weather}</Tag>
+                            {pendingTaskCount > 0 && (
+                              <Tag color="orange">待跟进: {pendingTaskCount}项</Tag>
+                            )}
+                          </Space>
+                        }
+                      >
+                        <Row gutter={[16, 8]}>
+                          <Col xs={24} md={12}>
+                            <strong style={{ color: '#666' }}>航道提示：</strong>
+                            <p style={{ marginTop: 4 }}>{record.channelNotes}</p>
+                          </Col>
+                          <Col xs={24} md={12}>
+                            <strong style={{ color: '#666' }}>设备状态：</strong>
+                            <p style={{ marginTop: 4 }}>{record.equipmentStatus}</p>
+                          </Col>
+                          <Col xs={24}>
+                            <strong style={{ color: record.pendingTasks?.trim() ? '#faad14' : '#666' }}>
+                              未完成事项：
+                            </strong>
+                            <p style={{ marginTop: 4, whiteSpace: 'pre-wrap' }}>
+                              {record.pendingTasks || '无'}
+                            </p>
+                          </Col>
+                          {record.remark && (
+                            <Col xs={24}>
+                              <strong style={{ color: '#666' }}>备注：</strong>
+                              <p style={{ marginTop: 4 }}>{record.remark}</p>
+                            </Col>
+                          )}
+                        </Row>
+                      </Card>
+                    )
+                  })}
               </div>
             )}
           </Card>
@@ -563,26 +673,48 @@ const Reports: React.FC = () => {
     },
     {
       key: 'fatigue',
-      label: '疲劳风险',
+      label: (
+        <Space>
+          疲劳风险
+          {fatigueRiskFilter !== 'all' && <Tag color="orange">已筛选</Tag>}
+        </Space>
+      ),
       children: (
         <div>
           <Card
             title="船员疲劳风险评估"
             extra={
-              <Button
-                type="primary"
-                icon={<ExportOutlined />}
-                onClick={() => {
-                  setExportType('fatigue')
-                  handleExport()
-                }}
-              >
-                导出疲劳报告
-              </Button>
+              <Space wrap>
+                <Select
+                  placeholder="风险等级筛选"
+                  style={{ width: 150 }}
+                  value={fatigueRiskFilter}
+                  onChange={setFatigueRiskFilter}
+                >
+                  <Option value="all">全部等级</Option>
+                  <Option value="high">仅高风险</Option>
+                  <Option value="medium">仅中风险</Option>
+                  <Option value="low">仅低风险</Option>
+                </Select>
+                <Button
+                  type="default"
+                  onClick={() => setFatigueRiskFilter('all')}
+                >
+                  清除筛选
+                </Button>
+                <Button
+                  type="primary"
+                  icon={<ExportOutlined />}
+                  loading={exporting}
+                  onClick={() => handleExport('fatigue')}
+                >
+                  导出疲劳报告 ({fatigueInfoList.length})
+                </Button>
+              </Space>
             }
           >
             {fatigueInfoList.length === 0 ? (
-              <Empty description="暂无船员数据" />
+              <Empty description="暂无符合条件的船员数据" />
             ) : (
               <Table
                 columns={fatigueColumns}
@@ -603,28 +735,23 @@ const Reports: React.FC = () => {
       <div className="page-header">
         <h2 className="page-title">报表窗口</h2>
         <Space>
-          <Form layout="inline" form={form}>
-            <Form.Item label="导出内容" initialValue="all" name="exportType">
-              <Select style={{ width: 150 }} onChange={setExportType} value={exportType}>
-                <Option value="all">完整报表</Option>
-                <Option value="shifts">仅值班表</Option>
-                <Option value="handover">仅交接记录</Option>
-                <Option value="fatigue">仅疲劳报告</Option>
-              </Select>
-            </Form.Item>
-          </Form>
           <Button
             type="primary"
             icon={<FileExcelOutlined />}
-            onClick={handleExport}
+            loading={exporting}
+            onClick={() => handleExport('all')}
           >
-            导出Excel报表
+            导出完整报表
           </Button>
         </Space>
       </div>
 
       <Card>
-        <Tabs items={tabItems} />
+        <Tabs
+          items={tabItems}
+          activeKey={activeTab}
+          onChange={setActiveTab}
+        />
       </Card>
 
       <Card
@@ -632,8 +759,9 @@ const Reports: React.FC = () => {
         style={{ marginTop: 16 }}
       >
         <ul style={{ margin: 0, paddingLeft: 20, color: '#666' }}>
-          <li>完整报表包含：航次摘要、值班表、交接记录、疲劳风险、异常事件</li>
-          <li>可通过上方筛选条件选择特定时间段的数据导出</li>
+          <li><strong>完整报表</strong>包含：航次摘要、值班表、交接记录、疲劳风险、异常事件</li>
+          <li><strong>单独导出</strong>：各页签的导出按钮仅导出当前页签的筛选数据</li>
+          <li>可通过各页签的筛选条件（日期范围、船员、风险等级）选择特定数据导出</li>
           <li>所有时间均使用24小时制，时长以小时为单位</li>
           <li>疲劳风险评估基于国际海事组织(IMO)疲劳管理标准</li>
           <li style={{ color: '#f5222d' }}>高风险提示：连续工作超过8小时或日均工作超过12小时</li>
