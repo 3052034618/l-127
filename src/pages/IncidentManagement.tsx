@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Button,
   Modal,
@@ -70,6 +71,8 @@ const statusGroups = [
 
 const IncidentManagement: React.FC = () => {
   const { state, dispatch } = useApp()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [form] = Form.useForm()
   const [modalVisible, setModalVisible] = useState(false)
   const [detailVisible, setDetailVisible] = useState(false)
@@ -78,6 +81,7 @@ const IncidentManagement: React.FC = () => {
   const [images, setImages] = useState<{ name: string; dataUrl: string }[]>([])
   const [viewMode, setViewMode] = useState<'list' | 'kanban'>('list')
   const [draggedIncident, setDraggedIncident] = useState<Incident | null>(null)
+  const [highlightedIncidentId, setHighlightedIncidentId] = useState<string | null>(null)
   const [dragOverStatus, setDragOverStatus] = useState<string | null>(null)
   const kanbanRef = useRef<HTMLDivElement>(null)
 
@@ -167,6 +171,27 @@ const IncidentManagement: React.FC = () => {
     setViewingIncident(incident)
     setDetailVisible(true)
   }
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const highlight = params.get('highlight')
+
+    if (highlight) {
+      const incident = voyageIncidents.find(i => i.id === highlight)
+      if (incident) {
+        setHighlightedIncidentId(highlight)
+        setViewingIncident(incident)
+        setDetailVisible(true)
+        navigate('/incidents', { replace: true })
+        setTimeout(() => {
+          const el = document.querySelector(`[data-row-key="${highlight}"]`)
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          }
+        }, 100)
+      }
+    }
+  }, [location.search, voyageIncidents])
 
   const handleDelete = (id: string) => {
     dispatch({ type: 'DELETE_INCIDENT', payload: id })
@@ -533,6 +558,7 @@ const IncidentManagement: React.FC = () => {
           dataSource={voyageIncidents}
           rowKey="id"
           bordered
+          rowClassName={(record) => record.id === highlightedIncidentId ? 'highlight-row' : ''}
           pagination={{ pageSize: 10 }}
         />
       </Card>

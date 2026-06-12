@@ -621,7 +621,7 @@ const ShiftScheduling: React.FC = () => {
       .filter(s =>
         s.crewId !== shift.crewId &&
         s.positionId === shift.positionId &&
-        dayjs(s.startTime).isAfter(dayjs(shift.startTime))
+        dayjs(s.startTime).isAfter(dayjs(shift.endTime))
       )
       .sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())[0]
 

@@ -280,3 +280,13 @@ body {
 .empty-state .empty-text {
   font-size: 14px;
 }
+
+.highlight-row > td {
+  background-color: #fffbe6 !important;
+  animation: highlightPulse 2s ease-in-out;
+}
+
+@keyframes highlightPulse {
+  0%, 100% { background-color: #fffbe6; }
+  50% { background-color: #fff1b8; }
+}

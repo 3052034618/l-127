@@ -65,6 +65,58 @@ const Reports: React.FC = () => {
   const voyageRecords = state.handoverRecords.filter(h => h.voyageId === state.currentVoyageId)
   const voyageIncidents = state.incidents.filter(i => i.voyageId === state.currentVoyageId)
 
+  const getCrewName = (crewId: string) => {
+    return state.crews.find(c => c.id === crewId)?.name || '未知'
+  }
+
+  const getPositionName = (positionId: string) => {
+    return state.positions.find(p => p.id === positionId)?.name || '未知'
+  }
+
+  const getPositionType = (positionId: string) => {
+    return state.positions.find(p => p.id === positionId)?.type || 'bridge'
+  }
+
+  const taskContentMatch = (a: string, b: string): boolean => {
+    const normalize = (s: string) => {
+      let result = s.toLowerCase()
+      result = result.replace(/[完成已处理解决关闭\s]/g, '')
+      return result.substring(0, Math.min(result.length, 15))
+    }
+    const na = normalize(a)
+    const nb = normalize(b)
+    if (na === nb) return true
+    if (na.includes(nb) || nb.includes(na)) return true
+    if (na.length >= 4 && nb.length >= 4) {
+      let matchCount = 0
+      for (let i = 0; i < na.length - 1; i++) {
+        if (nb.includes(na.substring(i, i + 2))) matchCount++
+      }
+      if (matchCount >= Math.min(na.length, nb.length) * 0.4) return true
+    }
+    return false
+  }
+
+  const isTaskCompletedInLaterHandover = (taskContent: string, sourceRecordId: string, records: HandoverRecord[]): boolean => {
+    const sourceRecord = records.find(r => r.id === sourceRecordId)
+    if (!sourceRecord) return false
+    const sourceTime = dayjs(sourceRecord.handoverTime)
+    const laterRecords = records.filter(r => dayjs(r.handoverTime).isAfter(sourceTime))
+    for (const later of laterRecords) {
+      if (!later.pendingTasks || !later.pendingTasks.trim() || later.pendingTasks === '无') continue
+      const lines = later.pendingTasks.split('\n').filter(l => l.trim())
+      for (const line of lines) {
+        if (taskContentMatch(line.trim(), taskContent)) {
+          const lower = line.trim().toLowerCase()
+          if (lower.includes('完成') || lower.includes('已处理') || lower.includes('已解决') || lower.includes('关闭')) {
+            return true
+          }
+        }
+      }
+    }
+    return false
+  }
+
   const filteredShifts = useMemo(() => {
     let result = [...voyageShifts]
     if (shiftDateRange) {
@@ -314,58 +366,6 @@ const Reports: React.FC = () => {
     return { total, closed, closeRate, chains }
   }, [voyageRecords])
 
-  const isTaskCompletedInLaterHandover = (taskContent: string, sourceRecordId: string, records: HandoverRecord[]): boolean => {
-    const sourceRecord = records.find(r => r.id === sourceRecordId)
-    if (!sourceRecord) return false
-    const sourceTime = dayjs(sourceRecord.handoverTime)
-    const laterRecords = records.filter(r => dayjs(r.handoverTime).isAfter(sourceTime))
-    for (const later of laterRecords) {
-      if (!later.pendingTasks || !later.pendingTasks.trim() || later.pendingTasks === '无') continue
-      const lines = later.pendingTasks.split('\n').filter(l => l.trim())
-      for (const line of lines) {
-        if (taskContentMatch(line.trim(), taskContent)) {
-          const lower = line.trim().toLowerCase()
-          if (lower.includes('完成') || lower.includes('已处理') || lower.includes('已解决') || lower.includes('关闭')) {
-            return true
-          }
-        }
-      }
-    }
-    return false
-  }
-
-  const taskContentMatch = (a: string, b: string): boolean => {
-    const normalize = (s: string) => {
-      let result = s.toLowerCase()
-      result = result.replace(/[完成已处理解决关闭\s]/g, '')
-      return result.substring(0, Math.min(result.length, 15))
-    }
-    const na = normalize(a)
-    const nb = normalize(b)
-    if (na === nb) return true
-    if (na.includes(nb) || nb.includes(na)) return true
-    if (na.length >= 4 && nb.length >= 4) {
-      let matchCount = 0
-      for (let i = 0; i < na.length - 1; i++) {
-        if (nb.includes(na.substring(i, i + 2))) matchCount++
-      }
-      if (matchCount >= Math.min(na.length, nb.length) * 0.4) return true
-    }
-    return false
-  }
-
-  const getCrewName = (crewId: string) => {
-    return state.crews.find(c => c.id === crewId)?.name || '未知'
-  }
-
-  const getPositionName = (positionId: string) => {
-    return state.positions.find(p => p.id === positionId)?.name || '未知'
-  }
-
-  const getPositionType = (positionId: string) => {
-    return state.positions.find(p => p.id === positionId)?.type || 'bridge'
-  }
-
   const createWorksheet = (data: any[], cols: number[], sheetName: string, wb: XLSX.WorkBook) => {
     const ws = XLSX.utils.json_to_sheet(data)
     ws['!cols'] = cols.map(wch => ({ wch }))
@@ -459,9 +459,9 @@ const Reports: React.FC = () => {
     '总交接记录': voyageRecords.length,
     '总异常事件': voyageIncidents.length,
     '排班调整次数': voyageChangeRecords.length,
-    '待办事项总数': pendingTaskStats.total,
-    '已完成待办': pendingTaskStats.completed,
-    '待办闭环率(%)': pendingTaskStats.closeRate,
+    '待办事项总数': pendingTaskChainStats.total,
+    '已闭环待办': pendingTaskChainStats.closed,
+    '待办闭环率(%)': pendingTaskChainStats.closeRate,
     '异常事件总数': incidentStats.total,
     '已解决事件': incidentStats.resolved,
     '平均解决耗时(小时)': incidentStats.avgResolveHours,
@@ -580,8 +580,10 @@ const Reports: React.FC = () => {
           [15, 10, 12, 12, 12, 12, 12, 12, 12, 12, 15, 10, 12, 12], '复盘总览', wb)
         createWorksheet(buildChangeRecordsExportData(),
           [12, 10, 18, 18, 18, 18, 18, 30], '排班变更记录', wb)
-        createWorksheet(buildPendingTasksExportData(),
-          [50, 10, 20, 20], '交等待办跟踪', wb)
+        createWorksheet(buildPendingTaskChainExportData(),
+          [50, 20, 10, 20], '待办闭环跟踪', wb)
+        createWorksheet(buildLedgerExportData(),
+          [20, 12, 20, 50], '复盘台账', wb)
         createWorksheet(buildIncidentExportData(),
           [20, 10, 8, 10, 18, 10, 18, 40, 40, 18, 15], '异常事件处理', wb)
       } else if (exportType === 'archive') {

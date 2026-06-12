@@ -66,6 +66,7 @@ const HandoverRecords: React.FC = () => {
   const [viewingRecord, setViewingRecord] = useState<HandoverRecord | null>(null)
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([])
   const [selectedPendingTasks, setSelectedPendingTasks] = useState<string[]>([])
+  const [highlightedRecordId, setHighlightedRecordId] = useState<string | null>(null)
 
   const currentVoyage = state.voyages.find(v => v.id === state.currentVoyageId)
   const voyageShifts = state.shifts.filter(s => s.voyageId === state.currentVoyageId)
@@ -140,7 +141,7 @@ const HandoverRecords: React.FC = () => {
     return voyageShifts
       .filter(s =>
         s.crewId !== currentShift.crewId &&
-        s.date === currentShift.date &&
+        s.positionId === currentShift.positionId &&
         dayjs(s.startTime).isAfter(dayjs(currentShift.endTime))
       )
       .sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())[0]
@@ -190,12 +191,30 @@ const HandoverRecords: React.FC = () => {
     const startTime = params.get('startTime')
     const endTime = params.get('endTime')
     const pendingTasksStr = params.get('pendingTasks') || ''
+    const highlight = params.get('highlight')
 
     if (shiftId && fromCrewId && startTime && endTime) {
       handleAddFromShift(shiftId, fromCrewId, toCrewId || '', startTime, endTime, pendingTasksStr)
       navigate('/handover', { replace: true })
+      return
     }
-  }, [location.search])
+
+    if (highlight) {
+      const record = voyageRecords.find(r => r.id === highlight)
+      if (record) {
+        setHighlightedRecordId(highlight)
+        setViewingRecord(record)
+        setDetailVisible(true)
+        navigate('/handover', { replace: true })
+        setTimeout(() => {
+          const el = document.querySelector(`[data-row-key="${highlight}"]`)
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          }
+        }, 100)
+      }
+    }
+  }, [location.search, voyageRecords])
 
   const handleAdd = () => {
     const availableShifts = getAvailableShifts()
@@ -587,6 +606,7 @@ const HandoverRecords: React.FC = () => {
             .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())}
           rowKey="id"
           bordered
+          rowClassName={(record) => record.id === highlightedRecordId ? 'highlight-row' : ''}
           pagination={{ pageSize: 10 }}
           expandable={{
             expandedRowRender: (record) => (
