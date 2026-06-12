@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Button,
   Modal,
@@ -56,6 +57,8 @@ interface PendingTask {
 
 const HandoverRecords: React.FC = () => {
   const { state, dispatch } = useApp()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [form] = Form.useForm()
   const [modalVisible, setModalVisible] = useState(false)
   const [detailVisible, setDetailVisible] = useState(false)
@@ -180,14 +183,19 @@ const HandoverRecords: React.FC = () => {
   }
 
   useEffect(() => {
-    const handler = (e: Event) => {
-      const customEvent = e as CustomEvent
-      const { shiftId, fromCrewId, toCrewId, startTime, endTime, pendingTasks } = customEvent.detail
-      handleAddFromShift(shiftId, fromCrewId, toCrewId, startTime, endTime, pendingTasks)
+    const params = new URLSearchParams(location.search)
+    const shiftId = params.get('shiftId')
+    const fromCrewId = params.get('fromCrewId')
+    const toCrewId = params.get('toCrewId')
+    const startTime = params.get('startTime')
+    const endTime = params.get('endTime')
+    const pendingTasksStr = params.get('pendingTasks') || ''
+
+    if (shiftId && fromCrewId && startTime && endTime) {
+      handleAddFromShift(shiftId, fromCrewId, toCrewId || '', startTime, endTime, pendingTasksStr)
+      navigate('/handover', { replace: true })
     }
-    window.addEventListener('navigateToHandover', handler)
-    return () => window.removeEventListener('navigateToHandover', handler)
-  }, [])
+  }, [location.search])
 
   const handleAdd = () => {
     const availableShifts = getAvailableShifts()

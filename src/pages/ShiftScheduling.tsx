@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   DndContext,
   closestCenter,
@@ -35,7 +36,8 @@ import {
   Descriptions,
   List,
   Badge,
-  Tooltip
+  Tooltip,
+  Table
 } from 'antd'
 import {
   PlusOutlined,
@@ -55,9 +57,12 @@ import {
   getShiftDurationHours,
   checkShiftOverlap,
   calculateFatigueInfo,
-  getTimeSlots
+  getTimeSlots,
+  calculateComplianceWarnings,
+  getNightShiftCount,
+  getAvgRestHours
 } from '@/utils'
-import type { Shift, Incident } from '@/types'
+import type { Shift, Incident, ComplianceWarning, ShiftChangeRecord, Crew } from '@/types'
 
 const { Option } = Select
 const { RangePicker } = TimePicker
@@ -252,6 +257,7 @@ const DraggableShift: React.FC<DraggableShiftProps> = ({
 
 const ShiftScheduling: React.FC = () => {
   const { state, dispatch } = useApp()
+  const navigate = useNavigate()
   const [form] = Form.useForm()
   const [templateForm] = Form.useForm()
   const [modalVisible, setModalVisible] = useState(false)
@@ -267,7 +273,17 @@ const ShiftScheduling: React.FC = () => {
   const [conflictWarning, setConflictWarning] = useState<string[]>([])
   const [fatigueWarning, setFatigueWarning] = useState<string[]>([])
 
-  const [onHandoverFromShift, setOnHandoverFromShift] = useState<((shift: Shift) => void) | null>(null)
+  const [templatePreviewVisible, setTemplatePreviewVisible] = useState(false)
+  const [previewTemplateShifts, setPreviewTemplateShifts] = useState<Shift[]>([])
+  const [previewConflicts, setPreviewConflicts] = useState<string[]>([])
+  const [previewFatigueWarnings, setPreviewFatigueWarnings] = useState<string[]>([])
+  const [templateConfig, setTemplateConfig] = useState<{
+    templateId: string
+    crewIds: string[]
+    startDate: dayjs.Dayjs
+    endDate: dayjs.Dayjs
+    startTime: dayjs.Dayjs
+  } | null>(null)
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -302,6 +318,67 @@ const ShiftScheduling: React.FC = () => {
     }
     return map
   }, [state.crews, voyageShifts, currentVoyage])
+
+  const complianceWarnings = useMemo<ComplianceWarning[]>(() => {
+    if (!currentVoyage) return []
+    return calculateComplianceWarnings(
+      state.crews,
+      voyageShifts,
+      state.positions,
+      currentVoyage.departureTime,
+      currentVoyage.arrivalTime
+    )
+  }, [state.crews, voyageShifts, state.positions, currentVoyage])
+
+  const voyageChangeRecords = useMemo(() => {
+    return state.shiftChangeRecords
+      .filter(r => r.voyageId === state.currentVoyageId)
+      .sort((a, b) => dayjs(b.operationTime).valueOf() - dayjs(a.operationTime).valueOf())
+  }, [state.shiftChangeRecords, state.currentVoyageId])
+
+  const recordShiftChange = (
+    operationType: ShiftChangeRecord['operationType'],
+    shift: Shift,
+    oldShift?: Shift,
+    reason?: string
+  ) => {
+    const record: ShiftChangeRecord = {
+      id: uuidv4(),
+      voyageId: shift.voyageId,
+      shiftId: shift.id,
+      operationType,
+      oldStartTime: oldShift?.startTime,
+      oldEndTime: oldShift?.endTime,
+      oldCrewId: oldShift?.crewId,
+      newStartTime: shift.startTime,
+      newEndTime: shift.endTime,
+      newCrewId: shift.crewId,
+      operationTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      reason,
+      createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
+    }
+    dispatch({ type: 'ADD_SHIFT_CHANGE', payload: record })
+  }
+
+  const batchRecordShiftChanges = (
+    operationType: ShiftChangeRecord['operationType'],
+    shifts: Shift[],
+    reason?: string
+  ) => {
+    const records: ShiftChangeRecord[] = shifts.map(shift => ({
+      id: uuidv4(),
+      voyageId: shift.voyageId,
+      shiftId: shift.id,
+      operationType,
+      newStartTime: shift.startTime,
+      newEndTime: shift.endTime,
+      newCrewId: shift.crewId,
+      operationTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      reason,
+      createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
+    }))
+    dispatch({ type: 'BATCH_ADD_SHIFT_CHANGES', payload: records })
+  }
 
   const snapToGrid = (minutes: number): number => {
     return Math.round(minutes / SNAP_MINUTES) * SNAP_MINUTES
@@ -421,6 +498,8 @@ const ShiftScheduling: React.FC = () => {
       }
     })
 
+    recordShiftChange('drag', { ...shift, startTime: fullStart, endTime: fullEnd }, shift, '拖拽调整班次时间')
+
     const crew = state.crews.find(c => c.id === shift.crewId)
     const fatigue = fatigueInfoMap.get(shift.crewId)
     if (fatigue && fatigue.riskLevel === 'high') {
@@ -498,6 +577,8 @@ const ShiftScheduling: React.FC = () => {
       }
     })
 
+    recordShiftChange('drag', { ...shift, startTime: fullStart, endTime: fullEnd }, shift, '拖拽调整班次时长')
+
     message.success('班次已更新')
     setPreviewShift(null)
     setResizingShift(null)
@@ -534,12 +615,34 @@ const ShiftScheduling: React.FC = () => {
   }
 
   const handleHandoverFromShift = (shift: Shift) => {
-    if (onHandoverFromShift) {
-      onHandoverFromShift(shift)
-    }
+    const handoverRecords = state.handoverRecords.filter(h => h.voyageId === state.currentVoyageId)
+    const nextShift = voyageShifts
+      .filter(s => s.crewId !== shift.crewId && s.date === shift.date)
+      .find(s => dayjs(s.startTime).isAfter(dayjs(shift.endTime)))
+
+    const lastHandover = handoverRecords
+      .filter(h => h.toCrewId === shift.crewId)
+      .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())[0]
+
+    const pendingTasks = lastHandover?.pendingTasks || ''
+
+    const params = new URLSearchParams({
+      shiftId: shift.id,
+      fromCrewId: shift.crewId,
+      toCrewId: nextShift?.crewId || '',
+      startTime: shift.startTime,
+      endTime: shift.endTime,
+      pendingTasks: pendingTasks
+    })
+
+    navigate(`/handover?${params.toString()}`)
   }
 
   const handleDeleteShift = (id: string) => {
+    const shift = voyageShifts.find(s => s.id === id)
+    if (shift) {
+      recordShiftChange('delete', shift, shift, '删除班次')
+    }
     dispatch({ type: 'DELETE_SHIFT', payload: id })
     message.success('班次已删除')
   }
@@ -586,20 +689,24 @@ const ShiftScheduling: React.FC = () => {
       }
 
       if (editingShift) {
+        const updatedShift = { ...editingShift, ...shiftData }
         dispatch({
           type: 'UPDATE_SHIFT',
-          payload: { ...editingShift, ...shiftData }
+          payload: updatedShift
         })
+        recordShiftChange('manual_edit', updatedShift, editingShift, '手工编辑班次')
         message.success('班次已更新')
       } else {
+        const newShift = {
+          ...shiftData,
+          id: uuidv4(),
+          createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
+        }
         dispatch({
           type: 'ADD_SHIFT',
-          payload: {
-            ...shiftData,
-            id: uuidv4(),
-            createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
-          }
+          payload: newShift
         })
+        recordShiftChange('add', newShift, undefined, '手工添加班次')
         message.success('班次已添加')
       }
 
@@ -671,55 +778,49 @@ const ShiftScheduling: React.FC = () => {
         currentDate = currentDate.add(1, 'day')
       }
 
-      if (conflicts.length > 0) {
-        Modal.confirm({
-          title: '发现冲突',
-          content: (
-            <div>
-              <p>生成的班次存在以下问题：</p>
-              {conflicts.length > 0 && (
-                <div>
-                  <p style={{ color: '#f5222d', fontWeight: 600 }}>时间冲突 ({conflicts.length}处)：</p>
-                  <ul style={{ color: '#f5222d' }}>
-                    {conflicts.slice(0, 5).map((c, i) => <li key={i}>{c}</li>)}
-                    {conflicts.length > 5 && <li>...还有 {conflicts.length - 5} 处冲突</li>}
-                  </ul>
-                </div>
-              )}
-              {fatigueWarnings.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <p style={{ color: '#faad14', fontWeight: 600 }}>疲劳警告 ({fatigueWarnings.length}处)：</p>
-                  <ul style={{ color: '#faad14' }}>
-                    {fatigueWarnings.slice(0, 5).map((w, i) => <li key={i}>{w}</li>)}
-                    {fatigueWarnings.length > 5 && <li>...还有 {fatigueWarnings.length - 5} 处警告</li>}
-                  </ul>
-                </div>
-              )}
-              <p style={{ marginTop: 12 }}>冲突的班次将被跳过，是否继续生成？</p>
-            </div>
-          ),
-          okText: '继续生成',
-          cancelText: '取消',
-          onOk: () => {
-            const validShifts = newShifts.filter(s => {
-              const overlaps = checkShiftOverlap(voyageShifts, s)
-              return overlaps.length === 0
-            })
-            validShifts.forEach(s => {
-              dispatch({ type: 'ADD_SHIFT', payload: s })
-            })
-            message.success(`成功生成 ${validShifts.length} 个班次，跳过 ${newShifts.length - validShifts.length} 个冲突班次`)
-            setTemplateModalVisible(false)
-          }
-        })
-      } else {
-        newShifts.forEach(s => {
-          dispatch({ type: 'ADD_SHIFT', payload: s })
-        })
-        message.success(`成功生成 ${newShifts.length} 个班次`)
-        setTemplateModalVisible(false)
-      }
+      setPreviewTemplateShifts(newShifts)
+      setPreviewConflicts(conflicts)
+      setPreviewFatigueWarnings(fatigueWarnings)
+      setTemplateConfig({ templateId, crewIds, startDate, endDate, startTime })
+      setTemplateModalVisible(false)
+      setTemplatePreviewVisible(true)
     })
+  }
+
+  const confirmGenerateTemplate = () => {
+    const validShifts = previewTemplateShifts.filter(s => {
+      const overlaps = checkShiftOverlap(voyageShifts, s)
+      return overlaps.length === 0
+    })
+
+    validShifts.forEach(s => {
+      dispatch({ type: 'ADD_SHIFT', payload: s })
+    })
+
+    if (validShifts.length > 0) {
+      batchRecordShiftChanges('batch_template', validShifts, `轮班模板生成(${templateConfig?.templateId || ''})`)
+    }
+
+    const skipped = previewTemplateShifts.length - validShifts.length
+    if (skipped > 0) {
+      message.success(`成功生成 ${validShifts.length} 个班次，跳过 ${skipped} 个冲突班次`)
+    } else {
+      message.success(`成功生成 ${validShifts.length} 个班次`)
+    }
+
+    setTemplatePreviewVisible(false)
+    setPreviewTemplateShifts([])
+    setPreviewConflicts([])
+    setPreviewFatigueWarnings([])
+    setTemplateConfig(null)
+  }
+
+  const cancelTemplatePreview = () => {
+    setTemplatePreviewVisible(false)
+    setPreviewTemplateShifts([])
+    setPreviewConflicts([])
+    setPreviewFatigueWarnings([])
+    setTemplateConfig(null)
   }
 
   const highRiskCrews = Array.from(fatigueInfoMap.values()).filter(f => f.riskLevel === 'high')
@@ -993,40 +1094,290 @@ const ShiftScheduling: React.FC = () => {
           </Row>
         </div>
       )
+    },
+    {
+      key: 'compliance',
+      label: (
+        <span>
+          <CheckCircleOutlined /> 合规检查
+        </span>
+      ),
+      children: (
+        <div>
+          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+            <Col xs={12} sm={6}>
+              <div className="stat-card">
+                <div className="stat-value" style={{ color: '#f5222d' }}>
+                  {complianceWarnings.filter(w => w.level === 'error').length}
+                </div>
+                <div className="stat-label">严重问题</div>
+              </div>
+            </Col>
+            <Col xs={12} sm={6}>
+              <div className="stat-card">
+                <div className="stat-value" style={{ color: '#faad14' }}>
+                  {complianceWarnings.filter(w => w.level === 'warning').length}
+                </div>
+                <div className="stat-label">警告提示</div>
+              </div>
+            </Col>
+            <Col xs={12} sm={6}>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {complianceWarnings.filter(w => w.type === 'continuous').length}
+                </div>
+                <div className="stat-label">超长连续值班</div>
+              </div>
+            </Col>
+            <Col xs={12} sm={6}>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {complianceWarnings.filter(w => w.type === 'rest').length}
+                </div>
+                <div className="stat-label">休息间隔不足</div>
+              </div>
+            </Col>
+          </Row>
+
+          <Card title="合规检查清单" size="small">
+            {complianceWarnings.length === 0 ? (
+              <Empty description="排班合规，无违规项" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <List
+                size="small"
+                dataSource={complianceWarnings}
+                renderItem={(warning) => (
+                  <List.Item
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => {
+                      if (warning.date) {
+                        setSelectedDate(warning.date)
+                        if (warning.type === 'position_coverage') {
+                          setActiveTab('bridge')
+                        } else {
+                          const crew = state.crews.find(c => c.id === warning.crewId)
+                          const pos = state.positions.find(p => p.id === crew?.positionId)
+                          setActiveTab(pos?.type === 'engine' ? 'engine' : 'bridge')
+                        }
+                        message.info(`已定位到 ${warning.date}`)
+                      }
+                    }}
+                  >
+                    <List.Item.Meta
+                      avatar={
+                        <div style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: '50%',
+                          background: warning.level === 'error' ? '#fff1f0' : '#fffbe6',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: warning.level === 'error' ? '#f5222d' : '#faad14',
+                          fontSize: 16
+                        }}>
+                          {warning.level === 'error' ? '✕' : '!'}
+                        </div>
+                      }
+                      title={
+                        <Space>
+                          <span style={{ color: warning.level === 'error' ? '#f5222d' : '#faad14', fontWeight: 500 }}>
+                            {warning.message}
+                          </span>
+                          {warning.date && (
+                            <Tag color="blue">{warning.date}</Tag>
+                          )}
+                        </Space>
+                      }
+                      description={
+                        <div>
+                          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>
+                            {warning.crewName} · {
+                              warning.type === 'continuous' ? '连续值班' :
+                              warning.type === 'rest' ? '休息间隔' :
+                              warning.type === 'night_shift' ? '夜班次数' : '岗位覆盖'
+                            }
+                          </div>
+                          {warning.detail && (
+                            <div style={{ fontSize: 12, color: '#666' }}>{warning.detail}</div>
+                          )}
+                        </div>
+                      }
+                    />
+                    <Tag style={{ cursor: 'pointer', color: '#1677ff' }}>
+                      点击定位
+                    </Tag>
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+
+          <Card title="船员值班统计" size="small" style={{ marginTop: 16 }}>
+            <Table
+              size="small"
+              dataSource={state.crews}
+              rowKey="id"
+              pagination={false}
+              columns={[
+                {
+                  title: '船员',
+                  dataIndex: 'name',
+                  key: 'name',
+                  width: 100
+                },
+                {
+                  title: '岗位',
+                  dataIndex: 'position',
+                  key: 'position',
+                  width: 100
+                },
+                {
+                  title: '总班次',
+                  key: 'shiftCount',
+                  width: 80,
+                  render: (_: unknown, record: Crew) => {
+                    const shifts = voyageShifts.filter(s => s.crewId === record.id)
+                    return shifts.length
+                  }
+                },
+                {
+                  title: '总工时',
+                  key: 'totalHours',
+                  width: 100,
+                  render: (_: unknown, record: Crew) => {
+                    const shifts = voyageShifts.filter(s => s.crewId === record.id)
+                    const total = shifts.reduce((sum, s) => sum + getShiftDurationHours(s.startTime, s.endTime), 0)
+                    return `${total.toFixed(1)}h`
+                  }
+                },
+                {
+                  title: '夜班次数',
+                  key: 'nightShifts',
+                  width: 100,
+                  render: (_: unknown, record: Crew) => {
+                    const shifts = voyageShifts.filter(s => s.crewId === record.id)
+                    return getNightShiftCount(shifts)
+                  }
+                },
+                {
+                  title: '平均休息',
+                  key: 'avgRest',
+                  width: 100,
+                  render: (_: unknown, record: Crew) => {
+                    const shifts = voyageShifts.filter(s => s.crewId === record.id)
+                    const avg = getAvgRestHours(shifts)
+                    return avg > 0 ? `${avg.toFixed(1)}h` : '-'
+                  }
+                },
+                {
+                  title: '疲劳风险',
+                  key: 'fatigue',
+                  width: 100,
+                  render: (_: unknown, record: Crew) => {
+                    const fatigue = fatigueInfoMap.get(record.id)
+                    if (!fatigue) return <Tag color="default">未评估</Tag>
+                    return (
+                      <Tag color={fatigue.riskLevel === 'low' ? 'green' : fatigue.riskLevel === 'medium' ? 'gold' : 'red'}>
+                        {fatigue.riskLevel === 'low' ? '正常' : fatigue.riskLevel === 'medium' ? '中风险' : '高风险'}
+                      </Tag>
+                    )
+                  }
+                }
+              ]}
+            />
+          </Card>
+        </div>
+      )
+    },
+    {
+      key: 'changes',
+      label: (
+        <span>
+          <FileTextOutlined /> 排班变更记录
+        </span>
+      ),
+      children: (
+        <div>
+          <Card title="排班变更历史" size="small">
+            {voyageChangeRecords.length === 0 ? (
+              <Empty description="暂无排班变更记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              <Table
+                size="small"
+                dataSource={voyageChangeRecords}
+                rowKey="id"
+                pagination={{ pageSize: 10 }}
+                columns={[
+                  {
+                    title: '操作类型',
+                    dataIndex: 'operationType',
+                    key: 'operationType',
+                    width: 100,
+                    render: (type: string) => {
+                      const typeMap: Record<string, { label: string; color: string }> = {
+                        drag: { label: '拖拽调整', color: 'blue' },
+                        batch_template: { label: '模板生成', color: 'purple' },
+                        manual_edit: { label: '手工编辑', color: 'geekblue' },
+                        add: { label: '新增班次', color: 'green' },
+                        delete: { label: '删除班次', color: 'red' }
+                      }
+                      const config = typeMap[type] || { label: type, color: 'default' }
+                      return <Tag color={config.color}>{config.label}</Tag>
+                    }
+                  },
+                  {
+                    title: '船员',
+                    key: 'crew',
+                    width: 100,
+                    render: (_: unknown, record: ShiftChangeRecord) => {
+                      const crewId = record.newCrewId || record.oldCrewId
+                      const crew = state.crews.find(c => c.id === crewId)
+                      return crew?.name || '-'
+                    }
+                  },
+                  {
+                    title: '原时间',
+                    key: 'oldTime',
+                    width: 180,
+                    render: (_: unknown, record: ShiftChangeRecord) => {
+                      if (!record.oldStartTime || !record.oldEndTime) return '-'
+                      return `${formatTime(record.oldStartTime)} - ${formatTime(record.oldEndTime)}`
+                    }
+                  },
+                  {
+                    title: '新时间',
+                    key: 'newTime',
+                    width: 180,
+                    render: (_: unknown, record: ShiftChangeRecord) => {
+                      if (!record.newStartTime || !record.newEndTime) return '-'
+                      return `${formatTime(record.newStartTime)} - ${formatTime(record.newEndTime)}`
+                    }
+                  },
+                  {
+                    title: '操作时间',
+                    dataIndex: 'operationTime',
+                    key: 'operationTime',
+                    width: 160,
+                    render: (time: string) => formatDateTime(time)
+                  },
+                  {
+                    title: '变更原因',
+                    dataIndex: 'reason',
+                    key: 'reason',
+                    render: (reason?: string) => reason || '-'
+                  }
+                ]}
+              />
+            )}
+          </Card>
+        </div>
+      )
     }
   ]
 
   const currentCrews = activeTab === 'bridge' ? bridgeCrews : engineCrews
   const shiftIncidents = viewingShift ? voyageIncidents.filter(i => i.shiftId === viewingShift.id) : []
-
-  React.useEffect(() => {
-    const handler = (shift: Shift) => {
-      const handoverRecords = state.handoverRecords.filter(h => h.voyageId === state.currentVoyageId)
-      const nextShift = voyageShifts
-        .filter(s => s.crewId !== shift.crewId && s.date === shift.date)
-        .find(s => dayjs(s.startTime).isAfter(dayjs(shift.endTime)))
-
-      const lastHandover = handoverRecords
-        .filter(h => h.toCrewId === shift.crewId)
-        .sort((a, b) => dayjs(b.handoverTime).valueOf() - dayjs(a.handoverTime).valueOf())[0]
-
-      const pendingTasks = lastHandover?.pendingTasks || ''
-
-      const event = new CustomEvent('navigateToHandover', {
-        detail: {
-          shiftId: shift.id,
-          fromCrewId: shift.crewId,
-          toCrewId: nextShift?.crewId || '',
-          startTime: shift.startTime,
-          endTime: shift.endTime,
-          pendingTasks
-        }
-      })
-      window.dispatchEvent(event)
-    }
-    setOnHandoverFromShift(() => handler)
-    return () => setOnHandoverFromShift(null)
-  }, [voyageShifts, state.handoverRecords, state.currentVoyageId])
 
   return (
     <div className="page-container">
@@ -1237,6 +1588,111 @@ const ShiftScheduling: React.FC = () => {
             showIcon
           />
         </Form>
+      </Modal>
+
+      <Modal
+        title="轮班模板预览"
+        open={templatePreviewVisible}
+        onOk={confirmGenerateTemplate}
+        onCancel={cancelTemplatePreview}
+        width={700}
+        okText="确认生成"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Space>
+            <Tag color="green">共生成 {previewTemplateShifts.length} 个班次</Tag>
+            {previewConflicts.length > 0 && (
+              <Tag color="red">冲突 {previewConflicts.length} 处</Tag>
+            )}
+            {previewFatigueWarnings.length > 0 && (
+              <Tag color="gold">疲劳警告 {previewFatigueWarnings.length} 处</Tag>
+            )}
+          </Space>
+        </div>
+
+        {(previewConflicts.length > 0 || previewFatigueWarnings.length > 0) && (
+          <Alert
+            message="注意事项"
+            description={
+              <div>
+                {previewConflicts.length > 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    <p style={{ color: '#f5222d', fontWeight: 600, margin: '0 0 4px 0' }}>
+                      时间冲突 ({previewConflicts.length}处)：
+                    </p>
+                    <ul style={{ color: '#f5222d', margin: 0, paddingLeft: 20 }}>
+                      {previewConflicts.slice(0, 5).map((c, i) => <li key={i}>{c}</li>)}
+                      {previewConflicts.length > 5 && <li>...还有 {previewConflicts.length - 5} 处冲突</li>}
+                    </ul>
+                    <p style={{ fontSize: 12, color: '#999', marginTop: 4 }}>冲突的班次将自动跳过</p>
+                  </div>
+                )}
+                {previewFatigueWarnings.length > 0 && (
+                  <div>
+                    <p style={{ color: '#faad14', fontWeight: 600, margin: '0 0 4px 0' }}>
+                      疲劳警告 ({previewFatigueWarnings.length}处)：
+                    </p>
+                    <ul style={{ color: '#faad14', margin: 0, paddingLeft: 20 }}>
+                      {previewFatigueWarnings.slice(0, 5).map((w, i) => <li key={i}>{w}</li>)}
+                      {previewFatigueWarnings.length > 5 && <li>...还有 {previewFatigueWarnings.length - 5} 处警告</li>}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            }
+            type={previewConflicts.length > 0 ? 'error' : 'warning'}
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
+        <Card title="生成预览" size="small" style={{ maxHeight: 300, overflow: 'auto' }}>
+          <Table
+            size="small"
+            dataSource={previewTemplateShifts.slice(0, 20)}
+            rowKey="id"
+            pagination={false}
+            columns={[
+              {
+                title: '日期',
+                dataIndex: 'date',
+                key: 'date',
+                width: 100
+              },
+              {
+                title: '船员',
+                key: 'crew',
+                width: 100,
+                render: (_: unknown, record: Shift) => {
+                  const crew = state.crews.find(c => c.id === record.crewId)
+                  return crew?.name || '-'
+                }
+              },
+              {
+                title: '岗位',
+                key: 'position',
+                width: 100,
+                render: (_: unknown, record: Shift) => {
+                  const pos = state.positions.find(p => p.id === record.positionId)
+                  return pos?.name || '-'
+                }
+              },
+              {
+                title: '值班时间',
+                key: 'time',
+                render: (_: unknown, record: Shift) => (
+                  <span>{formatTime(record.startTime)} - {formatTime(record.endTime)}</span>
+                )
+              }
+            ]}
+          />
+          {previewTemplateShifts.length > 20 && (
+            <div style={{ textAlign: 'center', padding: '8px 0', color: '#999', fontSize: 12 }}>
+              还有 {previewTemplateShifts.length - 20} 个班次未显示...
+            </div>
+          )}
+        </Card>
       </Modal>
 
       <Modal

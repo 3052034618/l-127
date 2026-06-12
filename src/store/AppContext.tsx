@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import dayjs from 'dayjs'
-import type { Voyage, Crew, Position, Shift, HandoverRecord, Incident } from '@/types'
+import type { Voyage, Crew, Position, Shift, HandoverRecord, Incident, ShiftChangeRecord } from '@/types'
 
 interface AppState {
   voyages: Voyage[]
@@ -10,6 +10,7 @@ interface AppState {
   shifts: Shift[]
   handoverRecords: HandoverRecord[]
   incidents: Incident[]
+  shiftChangeRecords: ShiftChangeRecord[]
   currentVoyageId: string | null
 }
 
@@ -35,6 +36,9 @@ type AppAction =
   | { type: 'ADD_INCIDENT'; payload: Incident }
   | { type: 'UPDATE_INCIDENT'; payload: Incident }
   | { type: 'DELETE_INCIDENT'; payload: string }
+  | { type: 'ADD_SHIFT_CHANGE'; payload: ShiftChangeRecord }
+  | { type: 'BATCH_ADD_SHIFT_CHANGES'; payload: ShiftChangeRecord[] }
+  | { type: 'DELETE_VOYAGE_SHIFT_CHANGES'; payload: string }
 
 const defaultPositions: Position[] = [
   { id: uuidv4(), name: '船长', type: 'bridge', description: '船舶总负责人', createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss') },
@@ -56,6 +60,7 @@ const initialState: AppState = {
   shifts: [],
   handoverRecords: [],
   incidents: [],
+  shiftChangeRecords: [],
   currentVoyageId: null
 }
 
@@ -149,6 +154,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         incidents: state.incidents.filter(i => i.id !== action.payload)
       }
+    case 'ADD_SHIFT_CHANGE':
+      return { ...state, shiftChangeRecords: [...state.shiftChangeRecords, action.payload] }
+    case 'BATCH_ADD_SHIFT_CHANGES':
+      return { ...state, shiftChangeRecords: [...state.shiftChangeRecords, ...action.payload] }
+    case 'DELETE_VOYAGE_SHIFT_CHANGES':
+      return {
+        ...state,
+        shiftChangeRecords: state.shiftChangeRecords.filter(r => r.voyageId !== action.payload)
+      }
     default:
       return state
   }
@@ -185,10 +199,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    const { voyages, crews, positions, shifts, handoverRecords, incidents, currentVoyageId } = state
+    const { voyages, crews, positions, shifts, handoverRecords, incidents, shiftChangeRecords, currentVoyageId } = state
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ voyages, crews, positions, shifts, handoverRecords, incidents, currentVoyageId })
+      JSON.stringify({ voyages, crews, positions, shifts, handoverRecords, incidents, shiftChangeRecords, currentVoyageId })
     )
   }, [state])
 

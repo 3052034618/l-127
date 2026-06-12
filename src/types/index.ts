@@ -85,3 +85,34 @@ export interface FatigueInfo {
   riskLevel: 'low' | 'medium' | 'high'
   warnings: string[]
 }
+
+export type ChangeOperationType = 'drag' | 'batch_template' | 'manual_edit' | 'delete' | 'add'
+
+export interface ShiftChangeRecord {
+  id: string
+  voyageId: string
+  shiftId: string
+  operationType: ChangeOperationType
+  oldStartTime?: string
+  oldEndTime?: string
+  oldCrewId?: string
+  newStartTime?: string
+  newEndTime?: string
+  newCrewId?: string
+  operationTime: string
+  operator?: string
+  reason?: string
+  createdAt: string
+}
+
+export interface ComplianceWarning {
+  id: string
+  type: 'continuous' | 'rest' | 'night_shift' | 'position_coverage'
+  crewId: string
+  crewName: string
+  level: 'warning' | 'error'
+  message: string
+  date?: string
+  shiftId?: string
+  detail?: string
+}

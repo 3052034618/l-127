@@ -34,7 +34,7 @@ import {
   calculateFatigueInfo,
   getShiftDurationHours
 } from '@/utils'
-import type { FatigueInfo } from '@/types'
+import type { FatigueInfo, ShiftChangeRecord } from '@/types'
 
 const { RangePicker } = DatePicker
 const { Option } = Select
@@ -100,6 +100,65 @@ const Reports: React.FC = () => {
     }
     return result
   }, [state.crews, voyageShifts, currentVoyage, fatigueRiskFilter])
+
+  const voyageChangeRecords = useMemo<ShiftChangeRecord[]>(() => {
+    return state.shiftChangeRecords
+      .filter(r => r.voyageId === state.currentVoyageId)
+      .sort((a, b) => dayjs(b.operationTime).valueOf() - dayjs(a.operationTime).valueOf())
+  }, [state.shiftChangeRecords, state.currentVoyageId])
+
+  const pendingTaskStats = useMemo(() => {
+    const allTasks: { content: string; status: 'pending' | 'completed'; sourceTime: string; completedTime?: string }[] = []
+
+    voyageRecords.forEach(record => {
+      if (record.pendingTasks && record.pendingTasks.trim() && record.pendingTasks !== '无') {
+        const lines = record.pendingTasks.split('\n').filter(l => l.trim())
+        lines.forEach(line => {
+          const lowerLine = line.toLowerCase()
+          const isCompleted = lowerLine.includes('完成') || lowerLine.includes('已处理') ||
+                             lowerLine.includes('已解决') || lowerLine.includes('关闭')
+          allTasks.push({
+            content: line.trim(),
+            status: isCompleted ? 'completed' : 'pending',
+            sourceTime: record.handoverTime,
+            completedTime: isCompleted ? record.handoverTime : undefined
+          })
+        })
+      }
+    })
+
+    const pending = allTasks.filter(t => t.status === 'pending').length
+    const completed = allTasks.filter(t => t.status === 'completed').length
+    const total = allTasks.length
+    const closeRate = total > 0 ? ((completed / total) * 100).toFixed(1) : '0'
+
+    return { total, pending, completed, closeRate, tasks: allTasks }
+  }, [voyageRecords])
+
+  const incidentStats = useMemo(() => {
+    const resolved = voyageIncidents.filter(i => i.status === 'resolved')
+    const processing = voyageIncidents.filter(i => i.status === 'processing')
+    const pending = voyageIncidents.filter(i => i.status === 'pending')
+
+    let avgResolveHours = 0
+    const resolvedWithTime = resolved.filter(i => i.resolvedTime)
+    if (resolvedWithTime.length > 0) {
+      const totalHours = resolvedWithTime.reduce((sum, i) => {
+        const hours = dayjs(i.resolvedTime).diff(dayjs(i.reportedTime), 'minute') / 60
+        return sum + hours
+      }, 0)
+      avgResolveHours = totalHours / resolvedWithTime.length
+    }
+
+    return {
+      total: voyageIncidents.length,
+      pending: pending.length,
+      processing: processing.length,
+      resolved: resolved.length,
+      avgResolveHours: avgResolveHours.toFixed(1),
+      severeCount: voyageIncidents.filter(i => i.level === 'severe').length
+    }
+  }, [voyageIncidents])
 
   const getCrewName = (crewId: string) => {
     return state.crews.find(c => c.id === crewId)?.name || '未知'
@@ -167,8 +226,55 @@ const Reports: React.FC = () => {
         : '',
       '描述': i.description,
       '处理结果': i.resolution || '',
-      '解决时间': i.resolvedTime ? formatDateTime(i.resolvedTime) : ''
+      '解决时间': i.resolvedTime ? formatDateTime(i.resolvedTime) : '',
+      '处理耗时(小时)': i.resolvedTime
+        ? (dayjs(i.resolvedTime).diff(dayjs(i.reportedTime), 'minute') / 60).toFixed(2)
+        : ''
     }))
+
+  const buildChangeRecordsExportData = () => voyageChangeRecords.map(r => {
+    const typeMap: Record<string, string> = {
+      drag: '拖拽调整',
+      batch_template: '模板生成',
+      manual_edit: '手工编辑',
+      add: '新增班次',
+      delete: '删除班次'
+    }
+    return {
+      '操作类型': typeMap[r.operationType] || r.operationType,
+      '船员': getCrewName(r.newCrewId || r.oldCrewId || ''),
+      '原开始时间': r.oldStartTime ? formatDateTime(r.oldStartTime) : '-',
+      '原结束时间': r.oldEndTime ? formatDateTime(r.oldEndTime) : '-',
+      '新开始时间': r.newStartTime ? formatDateTime(r.newStartTime) : '-',
+      '新结束时间': r.newEndTime ? formatDateTime(r.newEndTime) : '-',
+      '操作时间': formatDateTime(r.operationTime),
+      '变更原因': r.reason || ''
+    }
+  })
+
+  const buildPendingTasksExportData = () => pendingTaskStats.tasks.map(t => ({
+    '事项内容': t.content,
+    '状态': t.status === 'pending' ? '待处理' : '已完成',
+    '首次提出时间': formatDateTime(t.sourceTime),
+    '关闭时间': t.completedTime ? formatDateTime(t.completedTime) : '-'
+  }))
+
+  const buildReviewSummaryExportData = () => [{
+    '航次名称': currentVoyage?.name || '',
+    '总班次': voyageShifts.length,
+    '总交接记录': voyageRecords.length,
+    '总异常事件': voyageIncidents.length,
+    '排班调整次数': voyageChangeRecords.length,
+    '待办事项总数': pendingTaskStats.total,
+    '已完成待办': pendingTaskStats.completed,
+    '待办闭环率(%)': pendingTaskStats.closeRate,
+    '异常事件总数': incidentStats.total,
+    '已解决事件': incidentStats.resolved,
+    '平均解决耗时(小时)': incidentStats.avgResolveHours,
+    '严重事件数': incidentStats.severeCount,
+    '高风险船员数': fatigueInfoList.filter(f => f.riskLevel === 'high').length,
+    '中风险船员数': fatigueInfoList.filter(f => f.riskLevel === 'medium').length
+  }]
 
   const buildSummaryExportData = () => [{
     '航次名称': currentVoyage?.name || '',
@@ -185,7 +291,7 @@ const Reports: React.FC = () => {
     '低风险人数': fatigueInfoList.filter(f => f.riskLevel === 'low').length
   }]
 
-  const handleExport = async (exportType: 'all' | 'shifts' | 'handover' | 'fatigue') => {
+  const handleExport = async (exportType: 'all' | 'shifts' | 'handover' | 'fatigue' | 'review') => {
     if (!currentVoyage) {
       message.error('请先选择航次')
       return
@@ -203,6 +309,10 @@ const Reports: React.FC = () => {
       message.warning('当前筛选条件下没有可导出的疲劳数据')
       return
     }
+    if (exportType === 'review' && voyageChangeRecords.length === 0 && pendingTaskStats.total === 0 && voyageIncidents.length === 0) {
+      message.warning('当前航次没有可复盘的数据')
+      return
+    }
 
     setExporting(true)
     try {
@@ -218,7 +328,7 @@ const Reports: React.FC = () => {
         createWorksheet(buildFatigueExportData(),
           [12, 16, 18, 14, 10, 10, 40], '疲劳风险', wb)
         createWorksheet(buildIncidentExportData(),
-          [20, 10, 8, 10, 18, 10, 18, 40, 40, 18], '异常事件', wb)
+          [20, 10, 8, 10, 18, 10, 18, 40, 40, 18, 15], '异常事件', wb)
       } else if (exportType === 'shifts') {
         createWorksheet(buildShiftExportData(),
           [12, 12, 10, 12, 10, 10, 12], '值班表', wb)
@@ -228,6 +338,15 @@ const Reports: React.FC = () => {
       } else if (exportType === 'fatigue') {
         createWorksheet(buildFatigueExportData(),
           [12, 16, 18, 14, 10, 10, 40], '疲劳风险', wb)
+      } else if (exportType === 'review') {
+        createWorksheet(buildReviewSummaryExportData(),
+          [15, 10, 12, 12, 12, 12, 12, 12, 12, 12, 15, 10, 12, 12], '复盘总览', wb)
+        createWorksheet(buildChangeRecordsExportData(),
+          [12, 10, 18, 18, 18, 18, 18, 30], '排班变更记录', wb)
+        createWorksheet(buildPendingTasksExportData(),
+          [50, 10, 20, 20], '交等待办跟踪', wb)
+        createWorksheet(buildIncidentExportData(),
+          [20, 10, 8, 10, 18, 10, 18, 40, 40, 18, 15], '异常事件处理', wb)
       }
 
       const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
@@ -236,10 +355,11 @@ const Reports: React.FC = () => {
         all: '完整报表',
         shifts: '值班表',
         handover: '交接记录',
-        fatigue: '疲劳报告'
+        fatigue: '疲劳报告',
+        review: '航次复盘'
       }
 
-      const filterSuffix = exportType !== 'all' ? `_${activeTab}` : ''
+      const filterSuffix = exportType !== 'all' && exportType !== 'review' ? `_${activeTab}` : ''
       const fileName = `${currentVoyage.name}_${typeNames[exportType]}_${dayjs().format('YYYYMMDD_HHmm')}.xlsx`
 
       const result = await window.electronAPI.saveFile({
@@ -251,6 +371,7 @@ const Reports: React.FC = () => {
         const countText = exportType === 'shifts' ? `${filteredShifts.length}条记录`
           : exportType === 'handover' ? `${filteredRecords.length}条记录`
           : exportType === 'fatigue' ? `${fatigueInfoList.length}条记录`
+          : exportType === 'review' ? '复盘报表'
           : '全部数据'
         message.success(`${typeNames[exportType]}已导出到：${result.path}（${countText}）`)
       } else {
@@ -727,6 +848,228 @@ const Reports: React.FC = () => {
           </Card>
         </div>
       )
+    },
+    {
+      key: 'review',
+      label: '航次复盘',
+      children: (
+        <div>
+          <Card
+            title="航次复盘总览"
+            extra={
+              <Button
+                type="primary"
+                icon={<ExportOutlined />}
+                loading={exporting}
+                onClick={() => handleExport('review')}
+              >
+                导出航次复盘
+              </Button>
+            }
+            style={{ marginBottom: 16 }}
+          >
+            <Row gutter={[16, 16]}>
+              <Col xs={12} sm={6}>
+                <div className="stat-card">
+                  <div className="stat-value">{voyageChangeRecords.length}</div>
+                  <div className="stat-label">排班调整次数</div>
+                </div>
+              </Col>
+              <Col xs={12} sm={6}>
+                <div className="stat-card">
+                  <div className="stat-value">{pendingTaskStats.closeRate}%</div>
+                  <div className="stat-label">待办闭环率</div>
+                </div>
+              </Col>
+              <Col xs={12} sm={6}>
+                <div className="stat-card">
+                  <div className="stat-value">{incidentStats.avgResolveHours}h</div>
+                  <div className="stat-label">平均处理耗时</div>
+                </div>
+              </Col>
+              <Col xs={12} sm={6}>
+                <div className="stat-card">
+                  <div className="stat-value">{incidentStats.resolved}/{incidentStats.total}</div>
+                  <div className="stat-label">异常已解决/总数</div>
+                </div>
+              </Col>
+            </Row>
+          </Card>
+
+          <Card title="排班变更记录" style={{ marginBottom: 16 }}>
+            {voyageChangeRecords.length === 0 ? (
+              <Empty description="暂无排班变更记录" />
+            ) : (
+              <Table
+                dataSource={voyageChangeRecords}
+                rowKey="id"
+                bordered
+                size="small"
+                pagination={{ pageSize: 10, showSizeChanger: true }}
+                columns={[
+                  {
+                    title: '操作类型',
+                    dataIndex: 'operationType',
+                    key: 'operationType',
+                    width: 110,
+                    render: (type: string) => {
+                      const typeMap: Record<string, { text: string; color: string }> = {
+                        drag: { text: '拖拽调整', color: 'blue' },
+                        batch_template: { text: '模板生成', color: 'green' },
+                        manual_edit: { text: '手工编辑', color: 'orange' },
+                        add: { text: '新增班次', color: 'cyan' },
+                        delete: { text: '删除班次', color: 'red' }
+                      }
+                      const info = typeMap[type] || { text: type, color: 'default' }
+                      return <Tag color={info.color}>{info.text}</Tag>
+                    }
+                  },
+                  {
+                    title: '船员',
+                    dataIndex: 'newCrewId',
+                    key: 'crew',
+                    width: 80,
+                    render: (_: string, record: ShiftChangeRecord) =>
+                      getCrewName(record.newCrewId || record.oldCrewId || '')
+                  },
+                  {
+                    title: '原时间',
+                    key: 'oldTime',
+                    width: 220,
+                    render: (_: unknown, record: ShiftChangeRecord) =>
+                      record.oldStartTime && record.oldEndTime
+                        ? `${formatDateTime(record.oldStartTime)} ~ ${formatDateTime(record.oldEndTime)}`
+                        : '-'
+                  },
+                  {
+                    title: '新时间',
+                    key: 'newTime',
+                    width: 220,
+                    render: (_: unknown, record: ShiftChangeRecord) =>
+                      record.newStartTime && record.newEndTime
+                        ? `${formatDateTime(record.newStartTime)} ~ ${formatDateTime(record.newEndTime)}`
+                        : '-'
+                  },
+                  {
+                    title: '操作时间',
+                    dataIndex: 'operationTime',
+                    key: 'operationTime',
+                    width: 160,
+                    render: (time: string) => formatDateTime(time)
+                  },
+                  {
+                    title: '变更原因',
+                    dataIndex: 'reason',
+                    key: 'reason',
+                    render: (reason: string) => reason || '-'
+                  }
+                ]}
+              />
+            )}
+          </Card>
+
+          <Row gutter={[16, 0]}>
+            <Col xs={24} md={12}>
+              <Card title="交等待办跟踪" style={{ marginBottom: 16 }}>
+                {pendingTaskStats.total === 0 ? (
+                  <Empty description="暂无待办事项" />
+                ) : (
+                  <Table
+                    dataSource={pendingTaskStats.tasks}
+                    rowKey={(record, index) => index?.toString() || '0'}
+                    bordered
+                    size="small"
+                    pagination={{ pageSize: 8, showSizeChanger: true }}
+                    columns={[
+                      {
+                        title: '状态',
+                        dataIndex: 'status',
+                        key: 'status',
+                        width: 70,
+                        render: (status: string) => (
+                          <Tag color={status === 'pending' ? 'orange' : 'green'}>
+                            {status === 'pending' ? '待处理' : '已完成'}
+                          </Tag>
+                        )
+                      },
+                      {
+                        title: '事项内容',
+                        dataIndex: 'content',
+                        key: 'content',
+                        ellipsis: true
+                      }
+                    ]}
+                  />
+                )}
+              </Card>
+            </Col>
+            <Col xs={24} md={12}>
+              <Card title="异常事件处理">
+                {voyageIncidents.length === 0 ? (
+                  <Empty description="暂无异常事件" />
+                ) : (
+                  <Table
+                    dataSource={voyageIncidents
+                      .sort((a, b) => dayjs(b.reportedTime).valueOf() - dayjs(a.reportedTime).valueOf())}
+                    rowKey="id"
+                    bordered
+                    size="small"
+                    pagination={{ pageSize: 8, showSizeChanger: true }}
+                    columns={[
+                      {
+                        title: '标题',
+                        dataIndex: 'title',
+                        key: 'title',
+                        ellipsis: true
+                      },
+                      {
+                        title: '级别',
+                        dataIndex: 'level',
+                        key: 'level',
+                        width: 60,
+                        render: (level: string) => {
+                          const colorMap: Record<string, string> = {
+                            minor: 'green', moderate: 'orange', severe: 'red'
+                          }
+                          const textMap: Record<string, string> = {
+                            minor: '轻微', moderate: '一般', severe: '严重'
+                          }
+                          return <Tag color={colorMap[level]}>{textMap[level]}</Tag>
+                        }
+                      },
+                      {
+                        title: '状态',
+                        dataIndex: 'status',
+                        key: 'status',
+                        width: 70,
+                        render: (status: string) => {
+                          const colorMap: Record<string, string> = {
+                            pending: 'red', processing: 'orange', resolved: 'green'
+                          }
+                          const textMap: Record<string, string> = {
+                            pending: '待处理', processing: '处理中', resolved: '已解决'
+                          }
+                          return <Tag color={colorMap[status]}>{textMap[status]}</Tag>
+                        }
+                      },
+                      {
+                        title: '处理耗时',
+                        key: 'duration',
+                        width: 80,
+                        render: (_: unknown, record) => {
+                          if (record.status !== 'resolved' || !record.resolvedTime) return '-'
+                          const hours = dayjs(record.resolvedTime).diff(dayjs(record.reportedTime), 'minute') / 60
+                          return `${hours.toFixed(1)}h`
+                        }
+                      }
+                    ]}
+                  />
+                )}
+              </Card>
+            </Col>
+          </Row>
+        </div>
+      )
     }
   ]
 
@@ -760,6 +1103,7 @@ const Reports: React.FC = () => {
       >
         <ul style={{ margin: 0, paddingLeft: 20, color: '#666' }}>
           <li><strong>完整报表</strong>包含：航次摘要、值班表、交接记录、疲劳风险、异常事件</li>
+          <li><strong>航次复盘</strong>包含：复盘总览、排班变更记录、交等待办跟踪、异常事件处理</li>
           <li><strong>单独导出</strong>：各页签的导出按钮仅导出当前页签的筛选数据</li>
           <li>可通过各页签的筛选条件（日期范围、船员、风险等级）选择特定数据导出</li>
           <li>所有时间均使用24小时制，时长以小时为单位</li>
