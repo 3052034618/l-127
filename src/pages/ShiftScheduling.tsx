@@ -616,9 +616,14 @@ const ShiftScheduling: React.FC = () => {
 
   const handleHandoverFromShift = (shift: Shift) => {
     const handoverRecords = state.handoverRecords.filter(h => h.voyageId === state.currentVoyageId)
+
     const nextShift = voyageShifts
-      .filter(s => s.crewId !== shift.crewId && s.date === shift.date)
-      .find(s => dayjs(s.startTime).isAfter(dayjs(shift.endTime)))
+      .filter(s =>
+        s.crewId !== shift.crewId &&
+        s.positionId === shift.positionId &&
+        dayjs(s.startTime).isAfter(dayjs(shift.startTime))
+      )
+      .sort((a, b) => dayjs(a.startTime).valueOf() - dayjs(b.startTime).valueOf())[0]
 
     const lastHandover = handoverRecords
       .filter(h => h.toCrewId === shift.crewId)
@@ -1150,6 +1155,22 @@ const ShiftScheduling: React.FC = () => {
                   <List.Item
                     style={{ cursor: 'pointer' }}
                     onClick={() => {
+                      if (warning.shiftId) {
+                        const shift = voyageShifts.find(s => s.id === warning.shiftId)
+                        if (shift) {
+                          setSelectedDate(shift.date)
+                          const crew = state.crews.find(c => c.id === shift.crewId)
+                          const pos = state.positions.find(p => p.id === shift.positionId)
+                          if (pos?.type === 'engine') {
+                            setActiveTab('engine')
+                          } else {
+                            setActiveTab('bridge')
+                          }
+                          setViewingShift(shift)
+                          setDetailModalVisible(true)
+                          return
+                        }
+                      }
                       if (warning.date) {
                         setSelectedDate(warning.date)
                         if (warning.type === 'position_coverage') {
@@ -1159,7 +1180,7 @@ const ShiftScheduling: React.FC = () => {
                           const pos = state.positions.find(p => p.id === crew?.positionId)
                           setActiveTab(pos?.type === 'engine' ? 'engine' : 'bridge')
                         }
-                        message.info(`已定位到 ${warning.date}`)
+                        message.info(`已定位到 ${warning.date}，船员：${warning.crewName}`)
                       }
                     }}
                   >
